@@ -1,0 +1,102 @@
+{
+  "schema_version": 2,
+  "transform": "T_flange_camera",
+  "calibration_type": "eye_in_hand",
+  "method": "PARK",
+  "validated": false,
+  "source_dir": "/home/k3/yoloe_grasp_front/hand_eye_calib/data/2026-08-13_191506_ros2_tf",
+  "result_path": "/home/k3/yoloe_grasp_front/hand_eye_calib/data/2026-08-13_191506_ros2_tf/T_flange_camera.json",
+  "robot_id": 1,
+  "tag_family": "DICT_APRILTAG_36h11",
+  "tag_id": 0,
+  "tag_size_mm": 77.6,
+  "pnp_distortion_model": "distortion.inverse_brown_conrady",
+  "recorded_sample_count": 21,
+  "valid_sample_count": 21,
+  "valid_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "skipped": [],
+  "skipped_indices": [],
+  "matrix_4x4": [
+    [
+      0.9998338668701588,
+      0.008256446710889431,
+      -0.016250222988532514,
+      -0.008265527546176354
+    ],
+    [
+      0.006373153853725291,
+      -0.9936074240950608,
+      -0.11271055715034572,
+      0.11192414775731661
+    ],
+    [
+      -0.017076930913473044,
+      0.11258826702145419,
+      -0.9934949725890327,
+      -0.122544204018272
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "matrix_4x4_flat": [
+    0.9998338668701588,
+    0.008256446710889431,
+    -0.016250222988532514,
+    -0.008265527546176354,
+    0.006373153853725291,
+    -0.9936074240950608,
+    -0.11271055715034572,
+    0.11192414775731661,
+    -0.017076930913473044,
+    0.11258826702145419,
+    -0.9934949725890327,
+    -0.122544204018272,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "xyz_m": [
+    -0.008265527546176354,
+    0.11192414775731661,
+    -0.122544204018272
+  ],
+  "rpy_deg": [
+    173.53451373102257,
+    0.9784836301305486,
+    0.3652105462125644
+  ],
+  "camera_z_in_flange": [
+    -0.016250222988532514,
+    -0.11271055715034572,
+    -0.9934949725890327
+  ],
+  "abs_camera_z_dot_flange_z": 0.9934949725890327,
+  "warning": "This is an unvalidated PARK candidate. Validate with independent poses before using it in production."
+}
