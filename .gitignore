@@ -26,6 +26,9 @@ pip-wheel-metadata/
 *.temp
 *.swp
 *.swo
+monocular_rgb_calibration/captures/
+monocular_rgb_calibration/intrinsics.json
+monocular_rgb_calibration/chessboard_*.pdf
 
 # Local configuration and secrets
 .env
