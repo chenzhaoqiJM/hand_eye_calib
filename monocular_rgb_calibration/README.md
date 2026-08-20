@@ -26,10 +26,10 @@ python generate_chessboard_pdf.py
 
 ```bash
 python generate_chessboard_pdf.py \
-  --columns 9 --rows 6 \
+  --columns 7 --rows 4 \
   --square-size-mm 25 \
   --page-size A4 --orientation landscape \
-  --output chessboard_9x6_25mm.pdf
+  --output chessboard_7x4_25mm.pdf
 ```
 
 PDF 使用矢量方格，并附带 100 mm 校验尺。打印时必须选择 **100% / 实际大小**，关闭“适合页面”“缩小超大页面”和其他缩放选项。打印后用直尺测量多个方格及 100 mm 校验尺；测量值不准确时不能用于标定。
@@ -45,13 +45,13 @@ python -m pip install -r requirements.txt
 
 ```bash
 python calibrate_camera.py \
-  --device /dev/video0 \
+  --device /dev/video4 \
   --width 1280 --height 720 --fps 30 \
   --pixel-format MJPG \
-  --columns 9 --rows 6 \
-  --square-size-mm 25 \
+  --columns 7 --rows 4 \
+  --square-size-mm 24 \
   --min-samples 15 \
-  --output /media/chenzhaoqi/data/tmp/hand_eye_calib/eye_to_hand_rgb_v4l2/intrinsics.json
+  --output ./intrinsics.json
 ```
 
 程序会打印浏览器地址，通常为 `http://127.0.0.1:8080`，同一局域网设备也可通过打印出的主机 IP 打开。预览服务默认监听所有网卡且没有认证，只应在可信网络使用。
