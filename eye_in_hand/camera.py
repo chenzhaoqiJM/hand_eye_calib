@@ -97,8 +97,20 @@ if __name__ == "__main__":
     cam = Camera()
     try:
         cam.start()
+        print("RealSense camera started")
+        print(f"Device info: {cam.device_info}")
+        print(f"Stream config: {cam.stream_config}")
+        print("Color intrinsics:")
+        print(cam.intrinsics)
+        print(f"Distortion model: {cam.distortion_model}")
+        print(f"Distortion coefficients: {cam.dist_coeffs.tolist()}")
+
         img = cam.capture()
-        cv2.imwrite("captured_image.jpg", img)
-        print("Image saved: captured_image.jpg")
+        output_path = "captured_image.jpg"
+        ok = cv2.imwrite(output_path, img)
+        if not ok:
+            raise RuntimeError(f"Could not save image: {output_path}")
+        print(f"Captured image shape: {img.shape}, dtype: {img.dtype}")
+        print(f"Image saved: {output_path}")
     finally:
         cam.stop()
