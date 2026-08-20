@@ -1,0 +1,37 @@
+{
+  "type": "pixel_to_chessboard_plane_homography",
+  "matrix_pixel_to_plane": [
+    [
+      0.3649206937887989,
+      -0.30899692478044827,
+      -21.10048899830171
+    ],
+    [
+      0.2580063985763619,
+      0.3492605009727033,
+      -169.55502731034036
+    ],
+    [
+      -0.00011583080800734737,
+      -0.00024823367839446614,
+      1.0
+    ]
+  ],
+  "mapping": "[x, y, w] = H @ [u, v, 1]; X=x/w, Y=y/w",
+  "plane_coordinate_unit": "same_as_square_size",
+  "plane_origin": "first_detected_inner_corner",
+  "plane_axes": "X follows columns, Y follows rows",
+  "pattern_inner_corners": {
+    "columns": 7,
+    "rows": 4
+  },
+  "square_size": 25.0,
+  "image_size": {
+    "width": 1280,
+    "height": 720
+  },
+  "inlier_count": 28,
+  "corner_count": 28,
+  "max_reprojection_error": 0.30466323690506614,
+  "mean_reprojection_error": 0.11005365401199081
+}
