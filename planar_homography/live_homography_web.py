@@ -17,18 +17,29 @@ from homography_common import (
     detect_chessboard,
     draw_detection,
     homography_payload,
+    load_intrinsics_json,
     parse_pattern,
     reprojection_error,
     save_payload,
+    solve_camera_plane_pose,
     solve_homography,
 )
 
 
 class LiveState:
-    def __init__(self, pattern: tuple[int, int], square_size: float, output: Path) -> None:
+    def __init__(
+        self,
+        pattern: tuple[int, int],
+        square_size: float,
+        output: Path,
+        camera_matrix: np.ndarray,
+        dist_coeffs: np.ndarray,
+    ) -> None:
         self.pattern = pattern
         self.square_size = square_size
         self.output = output
+        self.camera_matrix = camera_matrix
+        self.dist_coeffs = dist_coeffs
         self.condition = threading.Condition()
         self.frame: np.ndarray | None = None
         self.jpeg: bytes | None = None
@@ -65,6 +76,10 @@ class LiveState:
         matrix, plane_points, inliers = solve_homography(
             corners, self.pattern, self.square_size
         )
+        camera_plane, pnp_rms = solve_camera_plane_pose(
+            corners, self.pattern, self.square_size,
+            self.camera_matrix, self.dist_coeffs,
+        )
         errors = reprojection_error(matrix, corners, plane_points)
         payload = homography_payload(
             matrix, self.pattern, self.square_size,
@@ -74,6 +89,9 @@ class LiveState:
             "u": float(corners[0, 0]),
             "v": float(corners[0, 1]),
         }
+        payload["matrix_camera_plane"] = camera_plane.tolist()
+        payload["camera_coordinate_unit"] = payload["plane_coordinate_unit"]
+        payload["pnp_reprojection_rms"] = pnp_rms
         self.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(self.output, payload)
         annotated = draw_detection(frame, corners, self.pattern)
@@ -211,20 +229,22 @@ pre{margin:0;text-align:left;overflow:auto;background:#25282d;padding:12px;min-h
 const $=s=>document.querySelector(s),status=$('#status'),result=$('#result'),measurement=$('#measurement');
 const stream=$('#stream'),image=$('#calibration'),canvas=$('#overlay'),ctx=canvas.getContext('2d');
 const pointButton=$('#pointMode'),distanceButton=$('#distanceMode'),clearButton=$('#clear');
-let H=null,mode='point',points=[],calibrated=false;
+let H=null,mode='point',points=[],calibrated=false,coordinateUnit='unknown';
 function mapPixel(u,v){const x=H[0][0]*u+H[0][1]*v+H[0][2],y=H[1][0]*u+H[1][1]*v+H[1][2],w=H[2][0]*u+H[2][1]*v+H[2][2];return{x:x/w,y:y/w}}
 function redraw(){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.lineWidth=Math.max(2,canvas.width/500);ctx.font=`${Math.max(14,canvas.width/55)}px system-ui`;
  if(points.length===2){ctx.strokeStyle='#ffd54f';ctx.beginPath();ctx.moveTo(points[0].u,points[0].v);ctx.lineTo(points[1].u,points[1].v);ctx.stroke()}
  points.forEach((p,i)=>{ctx.fillStyle=i?'#53a8ff':'#ffd54f';ctx.beginPath();ctx.arc(p.u,p.v,Math.max(5,canvas.width/150),0,Math.PI*2);ctx.fill();ctx.fillText(i?'B':'A',p.u+9,p.v-9)})}
 function report(){if(!points.length){measurement.textContent=mode==='point'?'Click the image to measure a point.':'Click two points to measure distance.';return}
- let text=points.map((p,i)=>`${i?'B':'A'} pixel: (${p.u.toFixed(2)}, ${p.v.toFixed(2)})\n${i?'B':'A'} plane: (${p.x.toFixed(3)}, ${p.y.toFixed(3)})`).join('\n\n');
- if(points.length===2){const d=Math.hypot(points[1].x-points[0].x,points[1].y-points[0].y);text+=`\n\nDistance A-B: ${d.toFixed(3)}`};measurement.textContent=text}
+ let text=points.map((p,i)=>`${i?'B':'A'} pixel: (${p.u.toFixed(2)}, ${p.v.toFixed(2)})\n${i?'B':'A'} plane [${coordinateUnit}]: (${p.x.toFixed(3)}, ${p.y.toFixed(3)})\n${i?'B':'A'} camera [${coordinateUnit}]: (${p.camera[0].toFixed(3)}, ${p.camera[1].toFixed(3)}, ${p.camera[2].toFixed(3)})`).join('\n\n');
+ if(points.length===2){const planeDistance=Math.hypot(points[1].x-points[0].x,points[1].y-points[0].y);const cameraDistance=Math.hypot(...points[1].camera.map((value,index)=>value-points[0].camera[index]));text+=`\n\nPlane distance A-B [${coordinateUnit}]: ${planeDistance.toFixed(3)}\nCamera distance A-B [${coordinateUnit}]: ${cameraDistance.toFixed(3)}`};measurement.textContent=text}
 function setMode(next){mode=next;points=[];pointButton.classList.toggle('active',mode==='point');distanceButton.classList.toggle('active',mode==='distance');redraw();report()}
-function showMeasurement(r){H=r.matrix_pixel_to_plane;calibrated=true;stream.hidden=true;image.hidden=false;canvas.hidden=false;
+function mapCamera(x,y){const T=runtimeCameraTransform;return[T[0][0]*x+T[0][1]*y+T[0][3],T[1][0]*x+T[1][1]*y+T[1][3],T[2][0]*x+T[2][1]*y+T[2][3]]}
+let runtimeCameraTransform=null;
+function showMeasurement(r){H=r.matrix_pixel_to_plane;runtimeCameraTransform=r.matrix_camera_plane;coordinateUnit=r.plane_coordinate_unit||'unknown';calibrated=true;stream.hidden=true;image.hidden=false;canvas.hidden=false;
  image.onload=()=>{canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;redraw()};image.src='/calibration.jpg?t='+Date.now();
  [pointButton,distanceButton,clearButton].forEach(b=>b.hidden=false);setMode('point');result.textContent=JSON.stringify(r,null,2)}
-image.onclick=e=>{if(!H)return;const rect=image.getBoundingClientRect(),u=(e.clientX-rect.left)*image.naturalWidth/rect.width,v=(e.clientY-rect.top)*image.naturalHeight/rect.height,p=mapPixel(u,v);
- if(mode==='point')points=[{u,v,...p}];else{if(points.length>=2)points=[];points.push({u,v,...p})}redraw();report()};
+image.onclick=e=>{if(!H||!runtimeCameraTransform)return;const rect=image.getBoundingClientRect(),u=(e.clientX-rect.left)*image.naturalWidth/rect.width,v=(e.clientY-rect.top)*image.naturalHeight/rect.height,p=mapPixel(u,v),camera=mapCamera(p.x,p.y);
+ if(mode==='point')points=[{u,v,...p,camera}];else{if(points.length>=2)points=[];points.push({u,v,...p,camera})}redraw();report()};
 pointButton.onclick=()=>setMode('point');distanceButton.onclick=()=>setMode('distance');clearButton.onclick=()=>{points=[];redraw();report()};
 async function poll(){try{const r=await fetch('/status',{cache:'no-store'}),s=await r.json();
  if(!calibrated)status.textContent=s.error|| (s.detected?'Chessboard detected. Ready to calculate.':'Chessboard not detected.');
@@ -249,6 +269,12 @@ def main() -> int:
     parser.add_argument("--pattern", default="9x6")
     parser.add_argument("--square-size", type=float, required=True)
     parser.add_argument("--output", type=Path, default=Path("pixel_to_plane_homography.json"))
+    parser.add_argument(
+        "--intrinsics", type=Path,
+        default=Path(__file__).resolve().parent.parent
+        / "monocular_rgb_calibration" / "intrinsics.json",
+        help="camera intrinsics JSON (default: ../monocular_rgb_calibration/intrinsics.json)",
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -264,7 +290,25 @@ def main() -> int:
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     capture.set(cv2.CAP_PROP_FPS, args.fps)
-    state = LiveState(pattern, args.square_size, args.output)
+    actual_size = (
+        int(round(capture.get(cv2.CAP_PROP_FRAME_WIDTH))),
+        int(round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))),
+    )
+    if actual_size != (args.width, args.height):
+        capture.release()
+        raise SystemExit(
+            f"camera returned resolution {actual_size[0]}x{actual_size[1]}, "
+            f"but --width/--height requested {args.width}x{args.height}; "
+            "use matching camera settings or update the intrinsics file"
+        )
+    try:
+        camera_matrix, dist_coeffs = load_intrinsics_json(args.intrinsics, actual_size)
+    except ValueError as exc:
+        capture.release()
+        raise SystemExit(f"Invalid intrinsics: {exc}") from exc
+    state = LiveState(
+        pattern, args.square_size, args.output, camera_matrix, dist_coeffs
+    )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     server.timeout = 0.05
     print(f"Open http://127.0.0.1:{server.server_address[1]} in a browser")

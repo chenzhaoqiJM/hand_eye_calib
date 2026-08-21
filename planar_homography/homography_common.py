@@ -70,6 +70,97 @@ def load_intrinsics(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return matrix, coeffs.reshape(-1, 1)
 
 
+def load_intrinsics_json(
+    path: Path,
+    image_size: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load the repository's intrinsics.json format and validate its scope."""
+    try:
+        with path.open(encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read intrinsics file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("intrinsics JSON top level must be an object")
+
+    required = ("fx", "fy", "cx", "cy", "width", "height", "coeffs")
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError(
+            "intrinsics JSON is missing required field(s): " + ", ".join(missing)
+        )
+    try:
+        width = int(data["width"])
+        height = int(data["height"])
+        values = np.asarray(
+            [data["fx"], data["fy"], data["cx"], data["cy"]],
+            dtype=np.float64,
+        )
+        coeffs = np.asarray(data["coeffs"], dtype=np.float64).reshape(-1, 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid numeric values in intrinsics JSON: {exc}") from exc
+    if not np.all(np.isfinite(values)) or values[0] <= 0 or values[1] <= 0:
+        raise ValueError("intrinsics fx/fy/cx/cy must be finite, with fx and fy > 0")
+    if width <= 0 or height <= 0:
+        raise ValueError("intrinsics width and height must be positive integers")
+    if (width, height) != image_size:
+        raise ValueError(
+            f"intrinsics resolution {width}x{height} does not match camera "
+            f"resolution {image_size[0]}x{image_size[1]}"
+        )
+    if coeffs.size < 4 or not np.all(np.isfinite(coeffs)):
+        raise ValueError("intrinsics coeffs must contain at least four finite values")
+    model = str(data.get("distortion_model", "plumb_bob")).lower()
+    if model not in ("plumb_bob", "brown_conrady", "opencv", "none"):
+        raise ValueError(f"unsupported distortion_model: {model}")
+    if model == "none" and np.any(np.abs(coeffs) > 1e-12):
+        raise ValueError("distortion_model is 'none' but coeffs are not all zero")
+
+    matrix = np.array(
+        [[values[0], 0.0, values[2]], [0.0, values[1], values[3]], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    return matrix, np.zeros_like(coeffs) if model == "none" else coeffs
+
+
+def solve_camera_plane_pose(
+    corners: np.ndarray,
+    pattern: tuple[int, int],
+    square_size: float,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Estimate T_camera_plane and RMS reprojection error using chessboard PnP."""
+    columns, rows = pattern
+    plane_points = np.array(
+        [(column * square_size, row * square_size, 0.0)
+         for row in range(rows) for column in range(columns)],
+        dtype=np.float64,
+    )
+    image_points = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+    if image_points.shape[0] != plane_points.shape[0]:
+        raise ValueError("detected corner count does not match pattern")
+    ok, rvec, tvec = cv2.solvePnP(
+        plane_points,
+        image_points,
+        camera_matrix,
+        dist_coeffs,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+    if not ok:
+        raise RuntimeError("could not calculate T_camera_plane with solvePnP")
+    rotation, _ = cv2.Rodrigues(rvec)
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = tvec.reshape(3)
+    projected, _ = cv2.projectPoints(
+        plane_points, rvec, tvec, camera_matrix, dist_coeffs
+    )
+    residual = projected.reshape(-1, 2) - image_points
+    rms = float(np.sqrt(np.mean(np.sum(residual * residual, axis=1))))
+    return transform, rms
+
+
 def solve_homography(
     corners: np.ndarray,
     pattern: tuple[int, int],

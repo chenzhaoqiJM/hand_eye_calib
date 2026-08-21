@@ -27,7 +27,6 @@ pip-wheel-metadata/
 *.swp
 *.swo
 monocular_rgb_calibration/captures/
-monocular_rgb_calibration/intrinsics.json
 monocular_rgb_calibration/chessboard_*.pdf
 eye_in_hand/captured_image.jpg
 # Local configuration and secrets

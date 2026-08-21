@@ -22,8 +22,8 @@ python -m pip install -r requirements.txt
 
 ```bash
 python calculate_homography.py image.jpg \
-  --pattern 9x6 \
-  --square-size 25 \
+  --pattern 7x4 \
+  --square-size 24 \
   --output pixel_to_plane_homography.json \
   --visualization corners.jpg
 ```
@@ -35,9 +35,12 @@ python calculate_homography.py image.jpg \
 ```bash
 python live_homography_web.py \
   --device /dev/video4 \
-  --width 1280 --height 720 --fps 30 \
+  --width 1280 \
+  --height 720 \
+  --fps 30 \
   --pattern 7x4 \
-  --square-size 25 \
+  --square-size 24 \
+  --intrinsics ../monocular_rgb_calibration/intrinsics.json \
   --output pixel_to_plane_homography.json \
   --port 8080
 ```
