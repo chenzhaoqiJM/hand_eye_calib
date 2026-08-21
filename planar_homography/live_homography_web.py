@@ -285,12 +285,12 @@ def main() -> int:
         help="camera intrinsics JSON (default: ../monocular_rgb_calibration/intrinsics.json)",
     )
     parser.add_argument(
-        "--undistort", action=argparse.BooleanOptionalAction, default=True,
-        help="undistort frames before detection (default: true)",
+        "--undistort", action=argparse.BooleanOptionalAction, default=False,
+        help="undistort frames before detection (default: false)",
     )
     parser.add_argument(
-        "--zero-distortion", action=argparse.BooleanOptionalAction, default=False,
-        help="pass zero distortion coefficients to solvePnP (default: false)",
+        "--zero-distortion", action=argparse.BooleanOptionalAction, default=True,
+        help="pass zero distortion coefficients to solvePnP (default: true)",
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)

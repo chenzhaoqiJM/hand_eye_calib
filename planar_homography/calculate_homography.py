@@ -50,12 +50,12 @@ def main() -> int:
         help="camera intrinsics JSON (default: ../monocular_rgb_calibration/intrinsics.json)",
     )
     parser.add_argument(
-        "--undistort", action=argparse.BooleanOptionalAction, default=True,
-        help="undistort the image before detection (default: true)",
+        "--undistort", action=argparse.BooleanOptionalAction, default=False,
+        help="undistort the image before detection (default: false)",
     )
     parser.add_argument(
-        "--zero-distortion", action=argparse.BooleanOptionalAction, default=False,
-        help="pass zero distortion coefficients to solvePnP (default: false)",
+        "--zero-distortion", action=argparse.BooleanOptionalAction, default=True,
+        help="pass zero distortion coefficients to solvePnP (default: true)",
     )
     args = parser.parse_args()
 
@@ -64,15 +64,13 @@ def main() -> int:
         image = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError(f"could not read image: {args.image}")
-        if not args.undistort and not args.zero_distortion:
-            working_image = image
-            camera_matrix = None
-            dist_coeffs = None
-        else:
-            camera_matrix, dist_coeffs = load_intrinsics_json(
-                args.intrinsics, (image.shape[1], image.shape[0])
-            )
-            working_image = undistort_image(image, camera_matrix, dist_coeffs)
+        camera_matrix, dist_coeffs = load_intrinsics_json(
+            args.intrinsics, (image.shape[1], image.shape[0])
+        )
+        working_image = (
+            undistort_image(image, camera_matrix, dist_coeffs)
+            if args.undistort else image
+        )
         corners = detect_chessboard(working_image, pattern)
         if corners is None:
             raise ValueError(
@@ -86,23 +84,15 @@ def main() -> int:
             matrix, pattern, args.square_size,
             (working_image.shape[1], working_image.shape[0]), inliers, errors,
         )
-        if args.undistort or args.zero_distortion:
-            assert camera_matrix is not None
-            assert dist_coeffs is not None
-            camera_plane, pnp_rms = solve_camera_plane_pose(
-                corners, pattern, args.square_size, camera_matrix,
-                np.zeros_like(dist_coeffs)
-                if args.zero_distortion or args.undistort else dist_coeffs,
-            )
-            payload["matrix_camera_plane"] = camera_plane.tolist()
-            payload["pnp_reprojection_rms"] = pnp_rms
-            payload["undistorted"] = args.undistort
-            payload["pnp_zero_distortion"] = (
-                args.zero_distortion or args.undistort
-            )
-        else:
-            payload["undistorted"] = False
-            payload["pnp_zero_distortion"] = False
+        camera_plane, pnp_rms = solve_camera_plane_pose(
+            corners, pattern, args.square_size, camera_matrix,
+            np.zeros_like(dist_coeffs)
+            if args.zero_distortion or args.undistort else dist_coeffs,
+        )
+        payload["matrix_camera_plane"] = camera_plane.tolist()
+        payload["pnp_reprojection_rms"] = pnp_rms
+        payload["undistorted"] = args.undistort
+        payload["pnp_zero_distortion"] = args.zero_distortion or args.undistort
         args.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(args.output, payload)
         if args.visualization:

@@ -1,6 +1,6 @@
 # 单棋盘格像素到二维平面映射
 
-本目录提供单张图片和实时 Web 两种标定方式。两种方式默认先使用相机内参对图像去畸变，再检测角点和计算映射。输出矩阵 `H_pixel_to_plane` 将去畸变图像的像素坐标映射到棋盘格平面坐标：
+本目录提供单张图片和实时 Web 两种标定方式。两种方式默认直接使用源图像或原始视频帧检测角点和计算映射；使用 `--undistort` 时，才会先使用相机内参去畸变。输出矩阵 `H_pixel_to_plane` 将实际用于检测的图像像素坐标映射到棋盘格平面坐标：
 
 ```text
 [X, Y, W] = H_pixel_to_plane @ [u, v, 1]
@@ -35,11 +35,11 @@ python -m pip install -r requirements.txt
 }
 ```
 
-`width` 和 `height` 必须与输入图像或摄像头实际返回的分辨率完全一致；脚本不会自动缩放内参。建议先使用 `monocular_rgb_calibration` 完成内参标定，再将生成的文件通过 `--intrinsics` 传入。去畸变后，PnP 使用相同的相机内参并传入全零畸变参数。
+`width` 和 `height` 必须与输入图像或摄像头实际返回的分辨率完全一致；脚本不会自动缩放内参。建议先使用 `monocular_rgb_calibration` 完成内参标定，再将生成的文件通过 `--intrinsics` 传入。默认不对源图像或视频帧去畸变，PnP 默认使用全零畸变参数。
 
-去畸变控制项为 `--undistort/--no-undistort`，默认值为 `--undistort`。如果输入图像或视频已经去畸变，可使用 `--no-undistort` 关闭此步骤。关闭后，实时模式会将内参文件中的原始畸变系数传给 PnP；单张图片模式只计算单应性，不执行 PnP。
+去畸变控制项为 `--undistort/--no-undistort`，默认值为 `--no-undistort`。需要先对输入图像或视频帧去畸变时，使用 `--undistort`。关闭去畸变时，检测和单应性计算直接使用源图像或原始视频帧。
 
-PnP 畸变参数可通过 `--zero-distortion` 置零，默认不启用。开启后，无论是否使用 `--undistort`，传给 `solvePnP` 的畸变参数都会是全零；该选项只影响 PnP，不改变图像是否去畸变。去畸变模式本身仍默认使用全零参数；在 `--no-undistort` 下可用该选项强制置零。可使用 `--no-zero-distortion` 显式恢复默认行为。
+PnP 畸变参数控制项为 `--zero-distortion/--no-zero-distortion`，默认值为 `--zero-distortion`。默认情况下传给 `solvePnP` 的畸变参数为全零；使用 `--no-zero-distortion` 时，在未去畸变的输入上使用内参文件中的原始畸变系数。启用 `--undistort` 时，PnP 始终使用全零畸变参数，因为角点已经位于去畸变图像坐标系中。
 
 ## 1. 从图像计算
 
@@ -92,20 +92,20 @@ python live_homography_web.py --device /dev/video4 \
   --output pixel_to_plane_homography.json --port 8080
 ```
 
-实时模式默认对每一帧调用 `cv2.undistort`。若摄像头输出已经去畸变，可添加 `--no-undistort`：
+实时模式默认直接使用摄像头原始帧。若需要先对每一帧调用 `cv2.undistort`，可添加 `--undistort`：
 
 ```bash
 python live_homography_web.py --device /dev/video4 \
   --width 1280 --height 720 --fps 30 \
-  --pattern 7x4 --square-size 25 --no-undistort
+  --pattern 7x4 --square-size 25 --undistort
 ```
 
-如果需要在未去畸变的图像上使用零畸变参数执行 PnP：
+如果需要在未去畸变的图像上使用内参文件中的原始畸变参数执行 PnP：
 
 ```bash
 python live_homography_web.py --device /dev/video4 \
   --width 1280 --height 720 --pattern 7x4 --square-size 25 \
-  --no-undistort --zero-distortion
+  --no-undistort --no-zero-distortion
 ```
 
 程序启动时会验证摄像头能否打开、实际分辨率是否等于 `--width`/`--height`，以及内参文件是否匹配。任一项失败都会直接退出；这不是棋盘检测失败。使用 V4L2 设备时，确认当前用户有权限访问 `/dev/video4`，并先用 `v4l2-ctl --list-formats-ext -d /dev/video4` 查看支持的分辨率。
@@ -118,7 +118,7 @@ python live_homography_web.py --device /dev/video4 \
 
 测量结果的单位与 `--square-size` 一致。浏览器中图像即使被缩放，点击位置也会换算回相机原始像素坐标。再次点击 **Calculate mapping matrix** 可用当前视频帧重新标定。
 
-实时页面中显示的相机坐标由 `matrix_camera_plane` 计算，表示棋盘平面坐标点在相机坐标系中的位置。`--zero-distortion` 开启时，该位姿使用零畸变参数计算。该位姿仅用于测量显示；像素到平面的主要结果是 `matrix_pixel_to_plane`。
+实时页面中显示的相机坐标由 `matrix_camera_plane` 计算，表示棋盘平面坐标点在相机坐标系中的位置。默认情况下，该位姿使用零畸变参数计算；只有在未去畸变并使用 `--no-zero-distortion` 时，才使用内参文件中的原始畸变参数。该位姿仅用于测量显示；像素到平面的主要结果是 `matrix_pixel_to_plane`。
 
 ## 输出 JSON
 
@@ -134,7 +134,7 @@ python live_homography_web.py --device /dev/video4 \
 
 ## 相机畸变
 
-实时模式和单张图片模式默认先去畸变。如果镜头畸变明显，建议保持默认设置，并使用与输入分辨率匹配的内参。需要强制 PnP 忽略畸变时使用 `--zero-distortion`；不要把原始畸变系数传给已经去畸变的像素，否则会重复校正。
+实时模式和单张图片模式默认使用源图像或原始视频帧，不执行去畸变，同时让 PnP 使用零畸变参数。如果镜头畸变明显，建议使用 `--undistort`，并使用与输入分辨率匹配的内参。去畸变后不要使用原始畸变系数执行 PnP，否则会对已经去畸变的像素重复校正。
 
 ## 注意
 
