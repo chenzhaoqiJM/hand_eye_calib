@@ -132,6 +132,29 @@ python live_homography_web.py --device /dev/video4 \
 
 实时模式还会写入 `plane_origin_pixel`、`matrix_camera_plane`、`camera_coordinate_unit`、`pnp_reprojection_rms` 和 `undistorted`。应用读取矩阵时，应使用输出中的图像尺寸；更换摄像头分辨率、镜头位置或工作平面后必须重新标定。
 
+## 3. 交互式查询坐标
+
+标定完成后，可以使用 `query_coordinates.py` 输入像素坐标，同时得到标定板坐标系和相机坐标系下的三维坐标：
+
+```bash
+python query_coordinates.py \
+  --calibration pixel_to_plane_homography.json
+```
+
+程序会循环等待输入，例如：
+
+```text
+请输入像素坐标 (u v): 357.287933 171.021576
+```
+
+其中标定板坐标为 `(X, Y, 0)`，相机坐标由输出 JSON 中的 `matrix_camera_plane` 计算。输入 `q`、`quit` 或 `exit` 退出。也可以直接转换一个坐标：
+
+```bash
+python query_coordinates.py --pixel 640 360
+```
+
+当前 JSON 的 `undistorted` 为 `true`，所以输入像素必须来自同一分辨率、同一去畸变模型下的图像坐标，不能直接把原始畸变图像中的像素坐标混用。坐标单位与标定时的 `square_size` 一致。
+
 ## 相机畸变
 
 实时模式和单张图片模式默认使用源图像或原始视频帧，不执行去畸变，同时让 PnP 使用零畸变参数。如果镜头畸变明显，建议使用 `--undistort`，并使用与输入分辨率匹配的内参。去畸变后不要使用原始畸变系数执行 PnP，否则会对已经去畸变的像素重复校正。
