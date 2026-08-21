@@ -53,6 +53,10 @@ def main() -> int:
         "--undistort", action=argparse.BooleanOptionalAction, default=True,
         help="undistort the image before detection (default: true)",
     )
+    parser.add_argument(
+        "--zero-distortion", action=argparse.BooleanOptionalAction, default=False,
+        help="pass zero distortion coefficients to solvePnP (default: false)",
+    )
     args = parser.parse_args()
 
     try:
@@ -60,7 +64,7 @@ def main() -> int:
         image = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError(f"could not read image: {args.image}")
-        if not args.undistort:
+        if not args.undistort and not args.zero_distortion:
             working_image = image
             camera_matrix = None
             dist_coeffs = None
@@ -82,17 +86,23 @@ def main() -> int:
             matrix, pattern, args.square_size,
             (working_image.shape[1], working_image.shape[0]), inliers, errors,
         )
-        if args.undistort:
+        if args.undistort or args.zero_distortion:
             assert camera_matrix is not None
+            assert dist_coeffs is not None
             camera_plane, pnp_rms = solve_camera_plane_pose(
                 corners, pattern, args.square_size, camera_matrix,
-                np.zeros_like(dist_coeffs),
+                np.zeros_like(dist_coeffs)
+                if args.zero_distortion or args.undistort else dist_coeffs,
             )
             payload["matrix_camera_plane"] = camera_plane.tolist()
             payload["pnp_reprojection_rms"] = pnp_rms
-            payload["undistorted"] = True
+            payload["undistorted"] = args.undistort
+            payload["pnp_zero_distortion"] = (
+                args.zero_distortion or args.undistort
+            )
         else:
             payload["undistorted"] = False
+            payload["pnp_zero_distortion"] = False
         args.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(args.output, payload)
         if args.visualization:

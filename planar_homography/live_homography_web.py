@@ -36,6 +36,7 @@ class LiveState:
         camera_matrix: np.ndarray,
         dist_coeffs: np.ndarray,
         undistort: bool,
+        zero_distortion: bool,
     ) -> None:
         self.pattern = pattern
         self.square_size = square_size
@@ -43,6 +44,7 @@ class LiveState:
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
         self.undistort = undistort
+        self.zero_distortion = zero_distortion
         self.condition = threading.Condition()
         self.frame: np.ndarray | None = None
         self.jpeg: bytes | None = None
@@ -82,7 +84,8 @@ class LiveState:
         camera_plane, pnp_rms = solve_camera_plane_pose(
             corners, self.pattern, self.square_size,
             self.camera_matrix,
-            np.zeros_like(self.dist_coeffs) if self.undistort else self.dist_coeffs,
+            np.zeros_like(self.dist_coeffs)
+            if self.zero_distortion or self.undistort else self.dist_coeffs,
         )
         errors = reprojection_error(matrix, corners, plane_points)
         payload = homography_payload(
@@ -97,6 +100,7 @@ class LiveState:
         payload["camera_coordinate_unit"] = payload["plane_coordinate_unit"]
         payload["pnp_reprojection_rms"] = pnp_rms
         payload["undistorted"] = self.undistort
+        payload["pnp_zero_distortion"] = self.zero_distortion or self.undistort
         self.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(self.output, payload)
         annotated = draw_detection(frame, corners, self.pattern)
@@ -284,6 +288,10 @@ def main() -> int:
         "--undistort", action=argparse.BooleanOptionalAction, default=True,
         help="undistort frames before detection (default: true)",
     )
+    parser.add_argument(
+        "--zero-distortion", action=argparse.BooleanOptionalAction, default=False,
+        help="pass zero distortion coefficients to solvePnP (default: false)",
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -317,7 +325,7 @@ def main() -> int:
         raise SystemExit(f"Invalid intrinsics: {exc}") from exc
     state = LiveState(
         pattern, args.square_size, args.output, camera_matrix, dist_coeffs,
-        args.undistort,
+        args.undistort, args.zero_distortion,
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     server.timeout = 0.05
