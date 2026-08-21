@@ -7,14 +7,18 @@ import argparse
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from homography_common import (
     detect_chessboard,
     homography_payload,
+    load_intrinsics_json,
     parse_pattern,
     reprojection_error,
     save_payload,
     solve_homography,
+    solve_camera_plane_pose,
+    undistort_image,
 )
 
 
@@ -39,6 +43,16 @@ def main() -> int:
         "--visualization", type=Path,
         help="optional output image with detected corners",
     )
+    parser.add_argument(
+        "--intrinsics", type=Path,
+        default=Path(__file__).resolve().parent.parent
+        / "monocular_rgb_calibration" / "intrinsics.json",
+        help="camera intrinsics JSON (default: ../monocular_rgb_calibration/intrinsics.json)",
+    )
+    parser.add_argument(
+        "--undistort", action=argparse.BooleanOptionalAction, default=True,
+        help="undistort the image before detection (default: true)",
+    )
     args = parser.parse_args()
 
     try:
@@ -46,7 +60,16 @@ def main() -> int:
         image = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError(f"could not read image: {args.image}")
-        corners = detect_chessboard(image, pattern)
+        if not args.undistort:
+            working_image = image
+            camera_matrix = None
+            dist_coeffs = None
+        else:
+            camera_matrix, dist_coeffs = load_intrinsics_json(
+                args.intrinsics, (image.shape[1], image.shape[0])
+            )
+            working_image = undistort_image(image, camera_matrix, dist_coeffs)
+        corners = detect_chessboard(working_image, pattern)
         if corners is None:
             raise ValueError(
                 f"chessboard {args.pattern} was not detected in {args.image}"
@@ -57,13 +80,24 @@ def main() -> int:
         errors = reprojection_error(matrix, corners, plane_points)
         payload = homography_payload(
             matrix, pattern, args.square_size,
-            (image.shape[1], image.shape[0]), inliers, errors,
+            (working_image.shape[1], working_image.shape[0]), inliers, errors,
         )
+        if args.undistort:
+            assert camera_matrix is not None
+            camera_plane, pnp_rms = solve_camera_plane_pose(
+                corners, pattern, args.square_size, camera_matrix,
+                np.zeros_like(dist_coeffs),
+            )
+            payload["matrix_camera_plane"] = camera_plane.tolist()
+            payload["pnp_reprojection_rms"] = pnp_rms
+            payload["undistorted"] = True
+        else:
+            payload["undistorted"] = False
         args.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(args.output, payload)
         if args.visualization:
             from homography_common import draw_detection
-            if not cv2.imwrite(str(args.visualization), draw_detection(image, corners, pattern)):
+            if not cv2.imwrite(str(args.visualization), draw_detection(working_image, corners, pattern)):
                 raise RuntimeError(f"could not write visualization: {args.visualization}")
     except (OSError, RuntimeError, ValueError, cv2.error) as exc:
         raise SystemExit(str(exc)) from exc

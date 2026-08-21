@@ -23,6 +23,7 @@ from homography_common import (
     save_payload,
     solve_camera_plane_pose,
     solve_homography,
+    undistort_image,
 )
 
 
@@ -34,12 +35,14 @@ class LiveState:
         output: Path,
         camera_matrix: np.ndarray,
         dist_coeffs: np.ndarray,
+        undistort: bool,
     ) -> None:
         self.pattern = pattern
         self.square_size = square_size
         self.output = output
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
+        self.undistort = undistort
         self.condition = threading.Condition()
         self.frame: np.ndarray | None = None
         self.jpeg: bytes | None = None
@@ -78,7 +81,8 @@ class LiveState:
         )
         camera_plane, pnp_rms = solve_camera_plane_pose(
             corners, self.pattern, self.square_size,
-            self.camera_matrix, self.dist_coeffs,
+            self.camera_matrix,
+            np.zeros_like(self.dist_coeffs) if self.undistort else self.dist_coeffs,
         )
         errors = reprojection_error(matrix, corners, plane_points)
         payload = homography_payload(
@@ -92,6 +96,7 @@ class LiveState:
         payload["matrix_camera_plane"] = camera_plane.tolist()
         payload["camera_coordinate_unit"] = payload["plane_coordinate_unit"]
         payload["pnp_reprojection_rms"] = pnp_rms
+        payload["undistorted"] = self.undistort
         self.output.parent.mkdir(parents=True, exist_ok=True)
         save_payload(self.output, payload)
         annotated = draw_detection(frame, corners, self.pattern)
@@ -275,6 +280,10 @@ def main() -> int:
         / "monocular_rgb_calibration" / "intrinsics.json",
         help="camera intrinsics JSON (default: ../monocular_rgb_calibration/intrinsics.json)",
     )
+    parser.add_argument(
+        "--undistort", action=argparse.BooleanOptionalAction, default=True,
+        help="undistort frames before detection (default: true)",
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -307,7 +316,8 @@ def main() -> int:
         capture.release()
         raise SystemExit(f"Invalid intrinsics: {exc}") from exc
     state = LiveState(
-        pattern, args.square_size, args.output, camera_matrix, dist_coeffs
+        pattern, args.square_size, args.output, camera_matrix, dist_coeffs,
+        args.undistort,
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     server.timeout = 0.05
@@ -317,7 +327,11 @@ def main() -> int:
             ok, frame = capture.read()
             if not ok:
                 raise RuntimeError("failed to read camera frame")
-            state.update(frame, detect_chessboard(frame, pattern))
+            working_frame = (
+                undistort_image(frame, camera_matrix, dist_coeffs)
+                if args.undistort else frame
+            )
+            state.update(working_frame, detect_chessboard(working_frame, pattern))
             server.handle_request()
     except KeyboardInterrupt:
         pass

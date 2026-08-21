@@ -123,6 +123,15 @@ def load_intrinsics_json(
     return matrix, np.zeros_like(coeffs) if model == "none" else coeffs
 
 
+def undistort_image(
+    image: np.ndarray,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+) -> np.ndarray:
+    """Return an image remapped to the ideal pinhole camera model."""
+    return cv2.undistort(image, camera_matrix, dist_coeffs)
+
+
 def solve_camera_plane_pose(
     corners: np.ndarray,
     pattern: tuple[int, int],
