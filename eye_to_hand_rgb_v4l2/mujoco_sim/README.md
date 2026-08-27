@@ -21,9 +21,22 @@ export MUJOCO_GL=egl
 
 ## 启动采集界面
 
+网页里的 `求解标定` 会根据启动参数选择求解来源：
+
 ```bash
-python sim_eye_to_hand.py --host 127.0.0.1 --port 8088
+python sim_eye_to_hand.py --host 127.0.0.1 --port 8088 --solve-source truth   # 使用 MuJoCo 真值目标位姿
+python sim_eye_to_hand.py --host 127.0.0.1 --port 8088 --solve-source image   # 使用棋盘格图像 PnP 位姿
 ```
+
+父目录的 `calibrate_from_data.py` 已支持棋盘格数据，也可以对本目录生成的数据进行离线求解：
+
+```bash
+python ../calibrate_from_data.py \
+  data/YYYY-mm-dd_HHMMSS \
+  --method PARK
+```
+
+程序会优先从数据目录的 `session.json` 读取棋盘格列数、行数和方格尺寸。
 
 启动后打开：
 
@@ -69,24 +82,6 @@ ground_truth_T_base_camera.json
 
 `T_base_camera.json` 是手眼标定得到的结果；`ground_truth_T_base_camera.json` 是 MuJoCo 固定相机的真值。网页点击 `求解标定` 后会额外写入 `ground_truth_error`，包含平移误差毫米值和旋转误差角度值。
 
-## 重新求解
-
-网页里的 `求解标定` 会根据启动参数选择求解来源：
-
-```bash
-python sim_eye_to_hand.py --solve-source truth   # 使用 MuJoCo 真值目标位姿
-python sim_eye_to_hand.py --solve-source image   # 使用棋盘格图像 PnP 位姿
-```
-
-父目录的 `calibrate_from_data.py` 已支持棋盘格数据，也可以对本目录生成的数据进行离线求解：
-
-```bash
-python ../calibrate_from_data.py \
-  data/YYYY-mm-dd_HHMMSS \
-  --method PARK
-```
-
-程序会优先从数据目录的 `session.json` 读取棋盘格列数、行数和方格尺寸。
 
 ## 常用参数
 

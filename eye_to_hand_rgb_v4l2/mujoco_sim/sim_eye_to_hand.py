@@ -31,11 +31,13 @@ if str(PARENT) not in sys.path:
 
 from calibrate_from_data import (  # noqa: E402
     METHODS,
+    chessboard_object_points,
+    detect_target_pose,
     evaluate_matrix,
     load_robot_pose,
+    solve_from_data,
     solve_matrix,
 )
-from camera_model import reprojection_rms_px, solve_pnp  # noqa: E402
 
 
 MENAGERIE_REPO = "https://github.com/google-deepmind/mujoco_menagerie"
@@ -277,19 +279,6 @@ def ensure_panda_model(model_root: Path) -> Path:
     return panda_xml
 
 
-def chessboard_object_points(columns: int, rows: int, square_size_mm: float) -> np.ndarray:
-    square = float(square_size_mm) / 1000.0
-    board_width = (columns + 1) * square
-    board_height = (rows + 1) * square
-    points = np.zeros((columns * rows, 3), dtype=np.float64)
-    for row in range(rows):
-        for col in range(columns):
-            offset = row * columns + col
-            points[offset, 0] = -board_width / 2.0 + (col + 1) * square
-            points[offset, 1] = board_height / 2.0 - (row + 1) * square
-    return points
-
-
 def append_board_scene(
     panda_xml: Path,
     scene_xml: Path,
@@ -508,20 +497,24 @@ class SimApp:
 
     def _analyze(self, bgr: np.ndarray) -> tuple[dict, np.ndarray]:
         overlay = bgr.copy()
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        found, corners = self._detect_chessboard_multiscale(gray)
         pattern = (self.args.chessboard_columns, self.args.chessboard_rows)
-        if not found or corners is None:
-            cv2.putText(overlay, "invalid: chessboard_not_found", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-            return {"valid": False, "reason": "chessboard_not_found"}, overlay
-        cv2.drawChessboardCorners(overlay, pattern, corners, found)
-        image_points = corners.reshape(-1, 2).astype(np.float64)
-        ok, rvec, tvec = solve_pnp(self.object_points, image_points, self.intrinsics, cv2.SOLVEPNP_ITERATIVE)
-        x, y, width, height = cv2.boundingRect(image_points.astype(np.float32))
-        coverage = float(width * height) / float(gray.shape[0] * gray.shape[1])
-        if not ok:
-            return {"valid": False, "reason": "solve_pnp_failed", "coverage": coverage}, overlay
-        rms = reprojection_rms_px(self.object_points, image_points, rvec, tvec, self.intrinsics)
+        target, rejection = detect_target_pose(
+            bgr,
+            None,
+            self.intrinsics,
+            self.object_points,
+            TARGET_TYPE,
+            self.args.chessboard_columns,
+            self.args.chessboard_rows,
+        )
+        if target is None:
+            reason = "unknown" if rejection is None else str(rejection["reason"])
+            cv2.putText(overlay, f"invalid: {reason}", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            return {"valid": False, "reason": reason}, overlay
+        corners = np.asarray(target["image_points"], dtype=np.float32).reshape(-1, 1, 2)
+        cv2.drawChessboardCorners(overlay, pattern, corners, True)
+        coverage = float(target["coverage"])
+        rms = float(target["reprojection_rms_px"])
         valid = coverage >= self.args.min_board_coverage and rms <= self.args.max_reprojection_px
         reason = "ok" if valid else ("board_too_small" if coverage < self.args.min_board_coverage else "reprojection_high")
         color = (80, 220, 80) if valid else (0, 210, 255)
@@ -529,32 +522,10 @@ class SimApp:
         return {
             "valid": bool(valid),
             "reason": reason,
-            "corner_count": int(image_points.shape[0]),
+            "corner_count": int(target["corner_count"]),
             "coverage": coverage,
-            "reprojection_rms_px": float(rms),
+            "reprojection_rms_px": rms,
         }, overlay
-
-    def _detect_chessboard_multiscale(self, gray: np.ndarray):
-        pattern = (self.args.chessboard_columns, self.args.chessboard_rows)
-        flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
-        if hasattr(cv2, "CALIB_CB_EXHAUSTIVE"):
-            flags |= cv2.CALIB_CB_EXHAUSTIVE
-        for scale in (1.0, 0.75, 0.5):
-            image = gray if scale == 1.0 else cv2.resize(gray, None, fx=scale, fy=scale)
-            found, corners = cv2.findChessboardCorners(image, pattern, flags)
-            if not found or corners is None:
-                continue
-            if scale != 1.0:
-                corners = (corners.astype(np.float64) / scale).astype(np.float32)
-            corners = cv2.cornerSubPix(
-                gray,
-                corners,
-                (11, 11),
-                (-1, -1),
-                (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
-            )
-            return True, corners
-        return False, None
 
     def status(self) -> dict:
         with self.lock:
@@ -644,68 +615,15 @@ class SimApp:
         return {"message": "求解完成"}
 
     def solve_from_images(self) -> dict:
-        pairs, skipped = [], []
-        for index in range(self.sample_count):
-            image_path = self.data_dir / f"frame_{index:03d}.png"
-            pose_path = self.data_dir / f"pose_{index:03d}.json"
-            if not image_path.is_file() or not pose_path.is_file():
-                skipped.append({"index": index, "reason": "missing_image_or_pose"})
-                continue
-            image = cv2.imread(str(image_path))
-            if image is None:
-                skipped.append({"index": index, "reason": "image_unreadable"})
-                continue
-            found, corners = self._detect_chessboard_multiscale(
-                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            )
-            if not found or corners is None:
-                skipped.append({"index": index, "reason": "chessboard_not_found"})
-                continue
-            image_points = corners.reshape(-1, 2).astype(np.float64)
-            ok, rvec, tvec = solve_pnp(
-                self.object_points, image_points, self.intrinsics, cv2.SOLVEPNP_ITERATIVE
-            )
-            if not ok:
-                skipped.append({"index": index, "reason": "solve_pnp_failed"})
-                continue
-            pairs.append({
-                "index": index,
-                "base_flange": load_robot_pose(pose_path),
-                "camera_target": matrix_from_pos_xmat(tvec, cv2.Rodrigues(rvec)[0]),
-                "reprojection_rms_px": reprojection_rms_px(
-                    self.object_points, image_points, rvec, tvec, self.intrinsics
-                ),
-            })
-        if len(pairs) < 8:
-            raise RuntimeError(f"棋盘格有效样本不足：{len(pairs)} < 8")
-        method_name = self.args.method.upper()
-        base_camera = solve_matrix(pairs, METHODS[method_name])
-        metrics = evaluate_matrix(pairs, base_camera)
-        rpy_deg = Rotation.from_matrix(base_camera[:3, :3]).as_euler("xyz", degrees=True)
-        result = {
-            "schema_version": 1,
-            "transform": "T_base_camera",
-            "meaning": "OpenCV camera coordinates to MuJoCo world/base coordinates",
-            "calibration_type": "eye_to_hand",
-            "method": method_name,
-            "source": "chessboard_image_pnp",
-            "validated": False,
-            "source_dir": str(self.data_dir),
-            "robot_id": "mujoco_franka_emika_panda",
-            "target_type": TARGET_TYPE,
-            "chessboard_columns": self.args.chessboard_columns,
-            "chessboard_rows": self.args.chessboard_rows,
-            "square_size_mm": self.square_size_mm,
-            "recorded_sample_count": self.sample_count,
-            "valid_sample_count": len(pairs),
-            "valid_indices": [item["index"] for item in pairs],
-            "skipped": skipped,
-            "matrix_4x4": base_camera.tolist(),
-            "matrix_4x4_flat": base_camera.flatten().tolist(),
-            "xyz_m": base_camera[:3, 3].tolist(),
-            "rpy_deg": rpy_deg.tolist(),
-            "consistency": metrics,
-        }
+        result = solve_from_data(
+            self.data_dir,
+            method_name=self.args.method,
+            target_type=TARGET_TYPE,
+            chessboard_columns=self.args.chessboard_columns,
+            chessboard_rows=self.args.chessboard_rows,
+            square_size_mm=self.square_size_mm,
+        )
+        result["source"] = "chessboard_image_pnp"
         write_json(self.data_dir / "T_base_camera.json", result)
         return result
 
@@ -851,7 +769,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-board-coverage", type=float, default=0.015)
     parser.add_argument("--max-reprojection-px", type=float, default=2.0)
     parser.add_argument("--method", choices=sorted(METHODS), default="PARK")
-    parser.add_argument("--solve-source", choices=["truth", "image"], default="truth")
+    parser.add_argument("--solve-source", choices=["truth", "image"], default="image")
     return parser.parse_args()
 
 
