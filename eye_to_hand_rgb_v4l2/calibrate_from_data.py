@@ -141,6 +141,43 @@ def read_image(path: Path):
     return cv2.imdecode(encoded, cv2.IMREAD_COLOR) if encoded.size else None
 
 
+def create_tag_detector():
+    dictionary = cv2.aruco.getPredefinedDictionary(TAG_FAMILY)
+    if hasattr(cv2.aruco, "ArucoDetector"):
+        return {
+            "dictionary": dictionary,
+            "detector": cv2.aruco.ArucoDetector(
+                dictionary, cv2.aruco.DetectorParameters()
+            ),
+            "parameters": None,
+        }
+    parameters = (
+        cv2.aruco.DetectorParameters_create()
+        if hasattr(cv2.aruco, "DetectorParameters_create") else None
+    )
+    return {"dictionary": dictionary, "detector": None, "parameters": parameters}
+
+
+def detect_markers_multiscale(gray: np.ndarray, detector: dict):
+    for scale in (1.0, 0.75, 0.5):
+        image = gray if scale == 1.0 else cv2.resize(gray, None, fx=scale, fy=scale)
+        if detector["detector"] is not None:
+            corners, ids, rejected = detector["detector"].detectMarkers(image)
+        else:
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                image, detector["dictionary"], parameters=detector["parameters"]
+            )
+        if ids is None or not len(corners):
+            continue
+        if scale != 1.0:
+            corners = [
+                (corner.astype(np.float64) / scale).astype(np.float32)
+                for corner in corners
+            ]
+        return corners, ids, rejected
+    return [], None, []
+
+
 def recorded_indices(data_dir: Path) -> list[int]:
     pattern = re.compile(r"frame_(\d{3})\.(png|jpg|jpeg|bmp)$", re.IGNORECASE)
     return sorted(
@@ -158,7 +195,9 @@ def recorded_image_path(data_dir: Path, index: int) -> Path | None:
 
 
 def detect_target_pose(image, detector, intrinsics: dict, object_points: np.ndarray):
-    corners, ids, _ = detector.detectMarkers(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))
+    corners, ids, _ = detect_markers_multiscale(
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), detector
+    )
     count = 0 if ids is None else int(np.asarray(ids).size)
     if ids is None or count != 1 or len(corners) != 1:
         return None, {"reason": "tag_count_not_one", "tag_count": count}
@@ -180,9 +219,7 @@ def detect_target_pose(image, detector, intrinsics: dict, object_points: np.ndar
 def collect_pairs(data_dir: Path, tag_size_mm: float):
     intrinsics = load_json(data_dir / "intrinsics.json")
     validate_intrinsics(intrinsics)
-    detector = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(TAG_FAMILY), cv2.aruco.DetectorParameters()
-    )
+    detector = create_tag_detector()
     points = tag_points(tag_size_mm)
     pairs, skipped = [], []
     expected_tag_id = None

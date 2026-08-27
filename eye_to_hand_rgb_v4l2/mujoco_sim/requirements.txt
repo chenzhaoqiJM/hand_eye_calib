@@ -1,0 +1,6 @@
+mujoco
+numpy
+opencv-contrib-python<5
+scipy
+flask
+requests
