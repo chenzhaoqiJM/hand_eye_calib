@@ -292,6 +292,7 @@ def detect_target_pose(
         return None, {"reason": "solve_pnp_failed"}
     target = {
         **target_metadata,
+            "image_points": image_points,
         "camera_target": transform(cv2.Rodrigues(rvec)[0], tvec),
         "reprojection_rms_px": reprojection_rms_px(
             object_points, image_points, rvec, tvec, intrinsics

@@ -41,16 +41,26 @@ python calibrate.py \
   --chessboard-columns 7 \
   --chessboard-rows 6 \
   --square-size-mm 40 \
+  --min-board-coverage 0.015 \
+  --max-reprojection-px 2.0 \
   --min-samples 20
 ```
 
-程序会在保存前检测棋盘格并检查 PnP 重投影误差。机器人停止后按 Enter 拍摄，再输入对应的：
+启动后终端会打印浏览器预览地址。打开该地址可以看到实时画面、棋盘格角点，以及以下状态：
+
+- `VALID`：当前画面是否满足保存条件；
+- `RMS`：PnP 重投影 RMS 误差，单位为像素；
+- `COVERAGE`：棋盘格角点包围区域占图像的比例。
+
+程序会在保存前再次检测棋盘格并检查这些质量指标。机器人停止后按 Enter 拍摄，再输入对应的：
 
 ```text
 x y z rx ry rz
 ```
 
 也可使用米和弧度：`--position-unit m --angle-unit rad`。
+
+如果预览中显示 `NOT FOUND`，请确认棋盘格内角点参数与实物一致，并确保棋盘格完整、清晰地出现在画面中。`--min-board-coverage` 和 `--max-reprojection-px` 分别控制最小覆盖率和最大允许重投影误差。
 
 ## 离线求解与验证
 

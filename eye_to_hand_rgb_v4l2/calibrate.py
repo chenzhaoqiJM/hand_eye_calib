@@ -47,6 +47,99 @@ def write_image(path: Path, image: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
+def assess_target(
+    target: dict | None,
+    rejection: dict | None,
+    target_type: str,
+    min_board_coverage: float,
+    max_reprojection_px: float,
+) -> tuple[bool, str]:
+    if target is None:
+        return False, "unknown" if rejection is None else str(rejection["reason"])
+    if target["reprojection_rms_px"] > max_reprojection_px:
+        return False, "reprojection_high"
+    if target_type == "chessboard" and target["coverage"] < min_board_coverage:
+        return False, "board_too_small"
+    return True, "ok"
+
+
+def draw_quality_overlay(
+    image: np.ndarray,
+    target: dict | None,
+    rejection: dict | None,
+    target_type: str,
+    chessboard_columns: int,
+    chessboard_rows: int,
+    min_board_coverage: float,
+    max_reprojection_px: float,
+) -> np.ndarray:
+    """Draw target detection and quality information on the live preview."""
+    overlay = image.copy()
+    target_type = target_type.lower()
+    if target is not None:
+        image_points = np.asarray(target["image_points"], dtype=np.float32)
+        if target_type == "chessboard":
+            cv2.drawChessboardCorners(
+                overlay,
+                (chessboard_columns, chessboard_rows),
+                image_points.reshape(-1, 1, 2),
+                True,
+            )
+        else:
+            cv2.polylines(
+                overlay,
+                [image_points.reshape(-1, 1, 2).astype(np.int32)],
+                True,
+                (255, 180, 0),
+                2,
+            )
+        valid, reason = assess_target(
+            target,
+            rejection,
+            target_type,
+            min_board_coverage,
+            max_reprojection_px,
+        )
+        color = (70, 220, 70) if valid else (0, 210, 255)
+        lines = [
+            f"{target_type.upper()}: DETECTED",
+            f"VALID: {'YES' if valid else 'NO'} ({reason})",
+            f"RMS: {target['reprojection_rms_px']:.3f} px / max {max_reprojection_px:.3f}",
+        ]
+        if target_type == "chessboard":
+            lines.append(
+                f"COVERAGE: {target['coverage']:.1%} / min {min_board_coverage:.1%}"
+            )
+    else:
+        reason = "unknown" if rejection is None else str(rejection["reason"])
+        color = (0, 0, 255)
+        lines = [
+            f"{target_type.upper()}: NOT FOUND",
+            f"VALID: NO ({reason})",
+            "RMS: -",
+            "COVERAGE: -" if target_type == "chessboard" else "",
+        ]
+
+    lines = [line for line in lines if line]
+    panel_height = 18 + 27 * len(lines)
+    panel_width = min(760, overlay.shape[1] - 20)
+    panel = overlay.copy()
+    cv2.rectangle(panel, (10, 10), (10 + panel_width, 10 + panel_height), (15, 20, 25), -1)
+    cv2.addWeighted(panel, 0.78, overlay, 0.22, 0.0, overlay)
+    for offset, line in enumerate(lines):
+        cv2.putText(
+            overlay,
+            line,
+            (22, 35 + offset * 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+    return overlay
+
+
 def prompt_pose(index: int, position_unit: str, angle_unit: str) -> np.ndarray | None:
     while True:
         line = input(
@@ -114,7 +207,40 @@ def collect(args: argparse.Namespace) -> Path:
             "intrinsics_source": str(intrinsics_source),
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         })
-        frame_stream = FrameStream(camera)
+        def process_preview(frame: np.ndarray) -> np.ndarray:
+            try:
+                target, rejection = detect_target_pose(
+                    frame,
+                    target_detector,
+                    intrinsics,
+                    target_points,
+                    args.target_type,
+                    args.chessboard_columns,
+                    args.chessboard_rows,
+                )
+                return draw_quality_overlay(
+                    frame,
+                    target,
+                    rejection,
+                    args.target_type,
+                    args.chessboard_columns,
+                    args.chessboard_rows,
+                    args.min_board_coverage,
+                    args.max_reprojection_px,
+                )
+            except (ValueError, cv2.error) as exc:
+                return draw_quality_overlay(
+                    frame,
+                    None,
+                    {"reason": f"processing_error: {exc}"},
+                    args.target_type,
+                    args.chessboard_columns,
+                    args.chessboard_rows,
+                    args.min_board_coverage,
+                    args.max_reprojection_px,
+                )
+
+        frame_stream = FrameStream(camera, process_preview)
         frame_stream.start()
         if not args.no_preview:
             preview_server = PreviewServer(frame_stream, args.preview_host, args.preview_port)
@@ -153,10 +279,22 @@ def collect(args: argparse.Namespace) -> Path:
             if target is None:
                 print(f"  Capture rejected: {rejection['reason']}")
                 continue
-            if target["reprojection_rms_px"] > args.max_reprojection_px:
+            valid, reason = assess_target(
+                target,
+                rejection,
+                args.target_type,
+                args.min_board_coverage,
+                args.max_reprojection_px,
+            )
+            if not valid:
+                details = f"reason={reason}"
+                if target is not None:
+                    details += (
+                        f", PnP RMS {target['reprojection_rms_px']:.3f}px"
+                        f", coverage {target.get('coverage', 0.0):.1%}"
+                    )
                 print(
-                    f"  Capture rejected: reprojection RMS "
-                    f"{target['reprojection_rms_px']:.3f}px > {args.max_reprojection_px:.3f}px"
+                    f"  Capture rejected: {details}"
                 )
                 continue
             if args.target_type == "chessboard":
@@ -214,6 +352,8 @@ def main() -> int:
     parser.add_argument("--chessboard-rows", type=int, default=6,
                         help="number of chessboard inner corners along Y")
     parser.add_argument("--square-size-mm", type=float, default=40.0)
+    parser.add_argument("--min-board-coverage", type=float, default=0.015,
+                        help="reject chessboards whose corner bounding box is smaller than this image fraction")
     parser.add_argument("--max-reprojection-px", type=float, default=2.0,
                         help="reject captures whose PnP RMS exceeds this value")
     parser.add_argument("--min-samples", type=int, default=15)
@@ -237,6 +377,8 @@ def main() -> int:
         parser.error("--square-size-mm must be positive")
     if not np.isfinite(args.max_reprojection_px) or args.max_reprojection_px <= 0:
         parser.error("--max-reprojection-px must be positive")
+    if not 0.0 <= args.min_board_coverage <= 1.0:
+        parser.error("--min-board-coverage must be between 0 and 1")
     if not 1 <= args.preview_port <= 65535:
         parser.error("--preview-port must be between 1 and 65535")
     try:

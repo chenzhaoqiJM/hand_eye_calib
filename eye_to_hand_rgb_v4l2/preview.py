@@ -6,14 +6,18 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
 import threading
+from collections.abc import Callable
 
 import cv2
 import numpy as np
 
 
 class FrameStream:
-    def __init__(self, camera) -> None:
+    def __init__(
+        self, camera, frame_processor: Callable[[np.ndarray], np.ndarray] | None = None
+    ) -> None:
         self._camera = camera
+        self._frame_processor = frame_processor
         self._condition = threading.Condition()
         self._frame: np.ndarray | None = None
         self._jpeg: bytes | None = None
@@ -63,7 +67,18 @@ class FrameStream:
                     if self._stopping:
                         return
                 frame = self._camera.capture()
-                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                preview_frame = (
+                    self._frame_processor(frame.copy())
+                    if self._frame_processor is not None else frame
+                )
+                if preview_frame.shape != frame.shape:
+                    raise RuntimeError(
+                        f"Frame processor returned shape {preview_frame.shape}, "
+                        f"expected {frame.shape}"
+                    )
+                ok, encoded = cv2.imencode(
+                    ".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                )
                 if not ok:
                     raise RuntimeError("Could not encode preview frame")
                 with self._condition:
