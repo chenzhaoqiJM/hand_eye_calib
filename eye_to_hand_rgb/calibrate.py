@@ -364,8 +364,8 @@ def main() -> int:
                         help="RealSense serial number when --camera-backend=realsense")
     parser.add_argument("--intrinsics", default=None,
                         help="RGB camera intrinsics JSON; required for V4L2, optional for RealSense")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pixel-format", default="MJPG", help="V4L2 FourCC, e.g. MJPG/YUYV")
     parser.add_argument("--target-type", choices=["apriltag", "chessboard"], default="apriltag")

@@ -87,7 +87,7 @@ ground_truth_T_base_camera.json
 
 ```bash
 python sim_eye_to_hand.py \
-  --width 1280 --height 720 \
+  --width 640 --height 480 \
   --chessboard-columns 7 \
   --chessboard-rows 6 \
   --square-size-mm 40 \

@@ -26,10 +26,10 @@ python -m pip install -r requirements.txt
 {
   "fx": 700.0,
   "fy": 700.0,
-  "cx": 640.0,
-  "cy": 360.0,
-  "width": 1280,
-  "height": 720,
+  "cx": 320.0,
+  "cy": 240.0,
+  "width": 640,
+  "height": 480,
   "coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
   "distortion_model": "plumb_bob"
 }
@@ -69,8 +69,8 @@ python calculate_homography.py image.jpg \
 ```bash
 python live_homography_web.py \
   --device /dev/video4 \
-  --width 1280 \
-  --height 720 \
+  --width 640 \
+  --height 480 \
   --fps 30 \
   --pattern 7x4 \
   --square-size 24 \
@@ -86,7 +86,7 @@ python live_homography_web.py \
 ```bash
 cd /path/to/hand_eye_calib/planar_homography
 python live_homography_web.py --device /dev/video4 \
-  --width 1280 --height 720 --fps 30 \
+  --width 640 --height 480 --fps 30 \
   --pattern 7x4 --square-size 25 \
   --intrinsics ../monocular_rgb_calibration/intrinsics.json \
   --output pixel_to_plane_homography.json --port 8080
@@ -96,7 +96,7 @@ python live_homography_web.py --device /dev/video4 \
 
 ```bash
 python live_homography_web.py --device /dev/video4 \
-  --width 1280 --height 720 --fps 30 \
+  --width 640 --height 480 --fps 30 \
   --pattern 7x4 --square-size 25 --undistort
 ```
 
@@ -104,7 +104,7 @@ python live_homography_web.py --device /dev/video4 \
 
 ```bash
 python live_homography_web.py --device /dev/video4 \
-  --width 1280 --height 720 --pattern 7x4 --square-size 25 \
+  --width 640 --height 480 --pattern 7x4 --square-size 25 \
   --no-undistort --no-zero-distortion
 ```
 
@@ -150,7 +150,7 @@ python query_coordinates.py \
 其中标定板坐标为 `(X, Y, 0)`，相机坐标由输出 JSON 中的 `matrix_camera_plane` 计算。输入 `q`、`quit` 或 `exit` 退出。也可以直接转换一个坐标：
 
 ```bash
-python query_coordinates.py --pixel 640 360
+python query_coordinates.py --pixel 320 240
 ```
 
 当前 JSON 的 `undistorted` 为 `true`，所以输入像素必须来自同一分辨率、同一去畸变模型下的图像坐标，不能直接把原始畸变图像中的像素坐标混用。坐标单位与标定时的 `square_size` 一致。

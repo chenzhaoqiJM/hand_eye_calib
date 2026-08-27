@@ -70,7 +70,7 @@ rs-enumerate-devices
 
 ### 使用 AprilTag
 
-默认采集 `1280×720 @ 30 FPS` 彩色图像，内参由设备自动读取，不需要提供 `--intrinsics`：
+默认采集 `640×480 @ 30 FPS` 彩色图像，内参由设备自动读取，不需要提供 `--intrinsics`：
 
 ```bash
 python calibrate.py \
@@ -86,8 +86,8 @@ python calibrate.py \
 python calibrate.py \
   --camera-backend realsense \
   --serial-number 123456789012 \
-  --width 1280 \
-  --height 720 \
+  --width 640 \
+  --height 480 \
   --fps 30 \
   --target-type apriltag \
   --tag-size-mm 50 \
@@ -101,8 +101,8 @@ python calibrate.py \
 ```bash
 python calibrate.py \
   --camera-backend realsense \
-  --width 1280 \
-  --height 720 \
+  --width 640 \
+  --height 480 \
   --fps 30 \
   --target-type chessboard \
   --chessboard-columns 7 \

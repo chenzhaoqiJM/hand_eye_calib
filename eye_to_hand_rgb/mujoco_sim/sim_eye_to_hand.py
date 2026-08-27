@@ -757,8 +757,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MuJoCo eye-to-hand RGB collection simulator")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8088)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--output-dir")
     parser.add_argument("--chessboard-columns", type=int, default=7,

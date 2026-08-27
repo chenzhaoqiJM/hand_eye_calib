@@ -272,8 +272,8 @@ async function poll(){try{const r=await fetch('/status',{cache:'no-store'}),s=aw
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live chessboard homography web tool")
     parser.add_argument("--device", default="/dev/video0")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pattern", default="9x6")
     parser.add_argument("--square-size", type=float, required=True)

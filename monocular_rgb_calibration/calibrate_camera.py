@@ -318,8 +318,8 @@ def preview_urls(host: str, port: int) -> list[str]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Browser-assisted V4L2 monocular RGB camera calibration")
     parser.add_argument("--device", default="/dev/video0")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pixel-format", default="MJPG", help="V4L2 FourCC, e.g. MJPG or YUYV")
     parser.add_argument("--columns", type=int, default=9, help="chessboard inner corner columns")

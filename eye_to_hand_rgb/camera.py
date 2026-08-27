@@ -15,8 +15,8 @@ class Camera:
     def __init__(
         self,
         device: str = "/dev/video0",
-        width: int = 1280,
-        height: int = 720,
+        width: int = 640,
+        height: int = 480,
         fps: int = 30,
         pixel_format: str = "MJPG",
     ) -> None:

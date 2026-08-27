@@ -46,7 +46,7 @@ python -m pip install -r requirements.txt
 ```bash
 python calibrate_camera.py \
   --device /dev/video4 \
-  --width 1280 --height 720 --fps 30 \
+  --width 640 --height 480 --fps 30 \
   --pixel-format YUYV \
   --columns 7 --rows 4 \
   --square-size-mm 24 \
