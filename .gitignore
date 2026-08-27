@@ -39,4 +39,5 @@ eye_in_hand/captured_image.jpg
 .idea/
 .DS_Store
 Thumbs.db
-eye_to_hand_rgb_v4l2/data
+eye_to_hand_rgb/data
+eye_to_hand_rgb/captured_realsense_color.jpg
