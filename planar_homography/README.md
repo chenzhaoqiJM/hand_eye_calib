@@ -81,16 +81,6 @@ python live_homography_web.py \
 
 浏览器打开 `http://127.0.0.1:8080`。页面会显示视频和棋盘格检测结果；只有点击 **Calculate mapping matrix** 后，脚本才会计算并保存矩阵。若需要局域网其他设备访问，将 `--host` 保持为默认的 `0.0.0.0`，然后访问运行设备的实际 IP。
 
-如果从其他目录启动脚本，建议使用脚本所在目录作为当前目录，或者把 `--intrinsics` 和 `--output` 写成明确路径。例如：
-
-```bash
-cd /path/to/hand_eye_calib/planar_homography
-python live_homography_web.py --device /dev/video4 \
-  --width 640 --height 480 --fps 30 \
-  --pattern 7x4 --square-size 25 \
-  --intrinsics ../monocular_rgb_calibration/intrinsics.json \
-  --output pixel_to_plane_homography.json --port 8080
-```
 
 实时模式默认直接使用摄像头原始帧。若需要先对每一帧调用 `cv2.undistort`，可添加 `--undistort`：
 
