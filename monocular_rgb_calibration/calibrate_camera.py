@@ -47,6 +47,7 @@ class CalibrationApp:
         self.stopping = False
         self.samples: list[tuple[np.ndarray, np.ndarray]] = []
         self.result: dict[str, object] | None = None
+        self.calibration_metrics: dict[str, object] | None = None
         self.session_dir = Path(args.session_dir).resolve() if args.session_dir else (
             HERE / "captures" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
         )
@@ -146,6 +147,16 @@ class CalibrationApp:
                 "min_samples": self.args.min_samples,
                 "calibrated": self.result is not None,
                 "output": str(Path(self.args.output).resolve()) if self.result else None,
+                "rms_reprojection_error_px": (
+                    self.calibration_metrics["rms_reprojection_error_px"]
+                    if self.calibration_metrics
+                    else None
+                ),
+                "per_view_error_px": (
+                    self.calibration_metrics["per_view_error_px"]
+                    if self.calibration_metrics
+                    else None
+                ),
             }
 
     def capture_sample(self) -> tuple[bool, str]:
@@ -207,6 +218,10 @@ class CalibrationApp:
         )
         with self.condition:
             self.result = result
+            self.calibration_metrics = {
+                "rms_reprojection_error_px": float(rms),
+                "per_view_error_px": [float(error) for error in per_view],
+            }
         print("\nCalibration completed")
         print(f"RMS reprojection error: {rms:.6f} px")
         print("Camera matrix K:")
@@ -228,12 +243,17 @@ h1{font-size:25px}.panel{background:#1f2937;border:1px solid #374151;border-radi
 img{display:block;width:100%;height:auto;border-radius:8px;background:#000}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 button{border:0;border-radius:8px;padding:11px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:white}
 button:disabled{opacity:.45;cursor:not-allowed}#calibrate{background:#059669}.valid{color:#4ade80}.invalid{color:#f87171}
-code{color:#93c5fd}small{color:#9ca3af}</style></head><body>
+code{color:#93c5fd}small{color:#9ca3af}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:14px 0}
+.metric{background:#111827;border-radius:8px;padding:12px}.metric-label{display:block;color:#9ca3af;font-size:14px}.metric-value{display:block;font-size:24px;margin-top:4px}.good{color:#4ade80}.warn{color:#facc15}.bad{color:#f87171}</style></head><body>
 <h1>单目 USB RGB 相机标定</h1><div class="panel"><img src="/stream.mjpg" alt="camera preview"></div>
 <div class="panel"><div class="row"><strong id="state">正在连接…</strong><span id="quality"></span></div>
 <p>有效样本：<b id="count">0</b> / <span id="minimum">0</span></p><div class="row">
 <button id="capture" onclick="post('/api/capture')">采集当前有效图像</button>
 <button id="calibrate" onclick="post('/api/calibrate')">计算并保存标定结果</button></div>
+<div id="calibration-result" hidden><div class="metrics">
+<div class="metric"><span class="metric-label">整体 RMS 重投影误差</span><b id="rms" class="metric-value">--</b></div>
+<div class="metric"><span class="metric-label">单图重投影误差范围</span><b id="per-view" class="metric-value">--</b></div>
+</div><small>通常 RMS 小于 1 px 较好；较大时请检查角点、清晰度、棋盘尺寸和样本姿态多样性。</small></div>
 <p id="notice"></p><small>请从不同距离和角度拍摄，使棋盘覆盖画面中心、边缘和四角；避免连续采集相同姿态。</small></div>
 <script>
 async function refresh(){try{const s=await (await fetch('/api/status',{cache:'no-store'})).json();
@@ -241,6 +261,10 @@ const state=document.getElementById('state');state.textContent=s.message;state.c
 document.getElementById('quality').textContent=`清晰度 ${s.sharpness.toFixed(1)} · 覆盖率 ${(s.coverage*100).toFixed(1)}%`;
 document.getElementById('count').textContent=s.samples;document.getElementById('minimum').textContent=s.min_samples;
 document.getElementById('capture').disabled=!s.valid;document.getElementById('calibrate').disabled=s.samples<s.min_samples;
+if(s.rms_reprojection_error_px!==null){const errors=s.per_view_error_px||[];const rms=s.rms_reprojection_error_px;
+document.getElementById('rms').textContent=`${rms.toFixed(3)} px`;document.getElementById('rms').className=`metric-value ${rms<=1?'good':rms<=2?'warn':'bad'}`;
+document.getElementById('per-view').textContent=errors.length?`${Math.min(...errors).toFixed(3)}–${Math.max(...errors).toFixed(3)} px`:'--';
+document.getElementById('calibration-result').hidden=false;}
 if(s.calibrated)document.getElementById('notice').textContent=`已保存：${s.output}`;}catch(e){document.getElementById('state').textContent=e;}}
 async function post(url){const b=document.querySelectorAll('button');b.forEach(x=>x.disabled=true);try{const r=await fetch(url,{method:'POST'});const d=await r.json();document.getElementById('notice').textContent=d.message;}catch(e){document.getElementById('notice').textContent=e;}finally{refresh();}}
 setInterval(refresh,500);refresh();</script></body></html>"""
