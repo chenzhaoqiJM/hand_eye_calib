@@ -1,10 +1,10 @@
 # MuJoCo 眼在手外 RGB 手眼标定验证
 
-本目录提供一个仿真的 `eye_to_hand_rgb_v4l2` 采集、标定和误差验证程序。机械臂使用 GitHub 上的 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) 中的 Franka Emika Panda MJCF 模型；首次运行会自动下载 `franka_emika_panda` 到 `third_party/`。
+本目录提供棋盘格眼在手外标定的 MuJoCo 仿真程序。仿真中，棋盘格刚性安装在 Panda 法兰上，RGB 相机固定在工作空间中；浏览器界面提供实时图像、棋盘格角点和质量指标、关节控制、采集及求解功能。
 
-程序会在 Panda 法兰/手爪末端刚性安装一个棋盘格标定板，在工作空间中放置一个固定 RGB 相机，并通过浏览器提供实时图像、棋盘格检测有效性、关节滑块、随机姿态、采集和求解按钮。
+默认 `--solve-source truth` 使用 MuJoCo 保存的 `T_camera_target` 真值求解，适合先验证手眼变换链路。使用 `--solve-source image` 可测试完整视觉流程：渲染图像 → 棋盘格检测 → PnP → 手眼求解。
 
-网页里的默认求解方式是 `--solve-source truth`：采集时仍要求图像中的棋盘格检测有效，但手眼求解使用 MuJoCo 保存的真值 `T_camera_target`，用于验证手眼数学链路和误差计算。若要专门测试“渲染图像 -> 棋盘角点 -> PnP -> 手眼”的完整视觉链路，可用 `--solve-source image`。
+机械臂使用 GitHub 上的 [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) 中的 Franka Emika Panda MJCF 模型；首次运行会自动下载 `franka_emika_panda` 到 `third_party/`。
 
 ## 安装依赖
 
@@ -31,16 +31,16 @@ python sim_eye_to_hand.py --host 127.0.0.1 --port 8088
 http://127.0.0.1:8088
 ```
 
-网页左侧是实时渲染图像，右侧会显示：
+网页左侧是实时渲染图像，检测到棋盘格时会绘制内角点；右侧会显示：
 
-- 当前棋盘格是否有效；
-- PnP 重投影 RMS；
+- 当前棋盘格是否检测到及是否有效；
+- PnP 重投影 RMS（像素）；
 - 棋盘格覆盖率；
 - 已采集样本数量；
 - 7 个关节目标滑块；
 - `随机姿态`、`采集当前帧`、`求解标定` 按钮。
 
-建议采集 20-30 组姿态。每次先点 `随机姿态` 或手动调整关节，等画面中棋盘格完整、状态为 `有效` 且重投影 RMS 较低后再点 `采集当前帧`。姿态要覆盖不同位置和不同旋转角度，否则手眼约束会退化。
+只有当前画面满足有效性条件时才能采集。建议采集 20～30 组姿态。每次先点 `随机姿态` 或手动调整关节，等棋盘格完整、状态为 `有效` 且重投影 RMS 较低后再点 `采集当前帧`。姿态要覆盖不同位置和不同旋转角度，否则手眼约束会退化。
 
 ## 输出数据
 
@@ -78,7 +78,15 @@ python sim_eye_to_hand.py --solve-source truth   # 使用 MuJoCo 真值目标位
 python sim_eye_to_hand.py --solve-source image   # 使用棋盘格图像 PnP 位姿
 ```
 
-父目录的 `calibrate_from_data.py` 仍是 AprilTag 离线求解器，不适用于本目录新生成的棋盘格图像数据。
+父目录的 `calibrate_from_data.py` 已支持棋盘格数据，也可以对本目录生成的数据进行离线求解：
+
+```bash
+python ../calibrate_from_data.py \
+  data/YYYY-mm-dd_HHMMSS \
+  --method PARK
+```
+
+程序会优先从数据目录的 `session.json` 读取棋盘格列数、行数和方格尺寸。
 
 ## 常用参数
 
@@ -103,6 +111,8 @@ python sim_eye_to_hand.py \
 - `--host 0.0.0.0`：允许局域网其他设备访问网页。该页面没有认证，只建议在可信网络使用。
 - `--solve-source truth`：使用 MuJoCo 真值 `T_camera_target` 求解，适合验证手眼链路和真值误差。
 - `--solve-source image`：使用采集图像中的棋盘格 PnP 结果求解，适合测试视觉检测链路；仿真渲染存在采样、遮挡和姿态覆盖问题，误差通常会比真值模式大。
+
+采集时若状态显示 `chessboard_not_found`，请确认内角点参数与棋盘格一致，并调整关节使棋盘格完整出现在相机画面中。`--min-board-coverage` 和 `--max-reprojection-px` 分别控制最小覆盖率和最大允许重投影误差。
 
 ## 坐标系
 
