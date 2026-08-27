@@ -33,18 +33,15 @@ from calibrate_from_data import (  # noqa: E402
     METHODS,
     evaluate_matrix,
     load_robot_pose,
-    solve_from_data,
     solve_matrix,
-    tag_points,
 )
-from camera_model import camera_matrix, reprojection_rms_px, solve_pnp  # noqa: E402
+from camera_model import reprojection_rms_px, solve_pnp  # noqa: E402
 
 
 MENAGERIE_REPO = "https://github.com/google-deepmind/mujoco_menagerie"
 MENAGERIE_RAW = "https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/main"
 PANDA_DIR = "franka_emika_panda"
-TAG_FAMILY = cv2.aruco.DICT_APRILTAG_36h11
-TAG_FAMILY_NAME = "DICT_APRILTAG_36h11"
+TARGET_TYPE = "chessboard"
 DEFAULT_JOINTS = np.array([0.0, -0.55, 0.0, -2.15, 0.0, 1.75, 0.78], dtype=np.float64)
 JOINT_LIMITS = np.array([
     [-2.70, 2.70],
@@ -100,7 +97,7 @@ INDEX_HTML = """
         <div class="metric"><b>样本数</b><span id="samples">0</span></div>
         <div class="metric"><b>有效性</b><span id="valid" class="warn">等待</span></div>
         <div class="metric"><b>重投影</b><span id="rms">-</span></div>
-        <div class="metric"><b>标签面积</b><span id="area">-</span></div>
+        <div class="metric"><b>覆盖率</b><span id="area">-</span></div>
       </div>
     </section>
     <section>
@@ -164,7 +161,7 @@ async function refresh(){
   valid.textContent = s.quality.valid ? "有效" : (s.quality.reason || "无效");
   valid.className = s.quality.valid ? "ok" : "bad";
   document.getElementById("rms").textContent = s.quality.reprojection_rms_px == null ? "-" : `${s.quality.reprojection_rms_px.toFixed(3)} px`;
-  document.getElementById("area").textContent = s.quality.area_px == null ? "-" : `${Math.round(s.quality.area_px)} px`;
+  document.getElementById("area").textContent = s.quality.coverage == null ? "-" : `${(s.quality.coverage * 100).toFixed(1)}%`;
 }
 async function randomPose(){ const r = await postJSON("/api/random_pose", {}); applyJoints(r.joints); }
 async function homePose(){ const r = await postJSON("/api/home", {}); applyJoints(r.joints); }
@@ -280,49 +277,34 @@ def ensure_panda_model(model_root: Path) -> Path:
     return panda_xml
 
 
-def make_tag_texture(path: Path, tag_id: int, pixels: int) -> None:
-    dictionary = cv2.aruco.getPredefinedDictionary(TAG_FAMILY)
-    if hasattr(cv2.aruco, "generateImageMarker"):
-        marker = cv2.aruco.generateImageMarker(dictionary, tag_id, pixels)
-    else:
-        marker = np.zeros((pixels, pixels), dtype=np.uint8)
-        cv2.aruco.drawMarker(dictionary, tag_id, pixels, marker, 1)
-    margin = max(16, pixels // 5)
-    image = np.full((pixels + 2 * margin, pixels + 2 * margin), 255, dtype=np.uint8)
-    image[margin:-margin, margin:-margin] = marker
-    bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    if not cv2.imwrite(str(path), bgr):
-        raise RuntimeError(f"Could not write tag texture: {path}")
-
-
-def tag_module_grid(tag_id: int, border_bits: int = 1) -> np.ndarray:
-    dictionary = cv2.aruco.getPredefinedDictionary(TAG_FAMILY)
-    cells = int(dictionary.markerSize + 2 * border_bits)
-    pixels_per_cell = 24
-    pixels = cells * pixels_per_cell
-    if hasattr(cv2.aruco, "generateImageMarker"):
-        marker = cv2.aruco.generateImageMarker(dictionary, tag_id, pixels)
-    else:
-        marker = np.zeros((pixels, pixels), dtype=np.uint8)
-        cv2.aruco.drawMarker(dictionary, tag_id, pixels, marker, border_bits)
-    grid = np.zeros((cells, cells), dtype=np.uint8)
-    for row in range(cells):
-        for col in range(cells):
-            y = row * pixels_per_cell + pixels_per_cell // 2
-            x = col * pixels_per_cell + pixels_per_cell // 2
-            grid[row, col] = 1 if marker[y, x] < 128 else 0
-    return grid
+def chessboard_object_points(columns: int, rows: int, square_size_mm: float) -> np.ndarray:
+    square = float(square_size_mm) / 1000.0
+    board_width = (columns + 1) * square
+    board_height = (rows + 1) * square
+    points = np.zeros((columns * rows, 3), dtype=np.float64)
+    for row in range(rows):
+        for col in range(columns):
+            offset = row * columns + col
+            points[offset, 0] = -board_width / 2.0 + (col + 1) * square
+            points[offset, 1] = board_height / 2.0 - (row + 1) * square
+    return points
 
 
 def append_board_scene(
-    panda_xml: Path, scene_xml: Path, tag_id: int, tag_size_m: float, width: int, height: int
+    panda_xml: Path,
+    scene_xml: Path,
+    columns: int,
+    rows: int,
+    square_size_m: float,
+    width: int,
+    height: int,
 ) -> None:
     root = ET.parse(panda_xml).getroot()
     asset = root.find("asset")
     if asset is None:
         asset = ET.SubElement(root, "asset")
-    ET.SubElement(asset, "material", {"name": "calib_tag_white", "rgba": "1 1 1 1"})
-    ET.SubElement(asset, "material", {"name": "calib_tag_black", "rgba": "0 0 0 1"})
+    ET.SubElement(asset, "material", {"name": "calib_board_white", "rgba": "1 1 1 1"})
+    ET.SubElement(asset, "material", {"name": "calib_board_black", "rgba": "0 0 0 1"})
 
     hand = root.find(".//body[@name='hand']")
     if hand is None:
@@ -332,29 +314,29 @@ def append_board_scene(
         "pos": "0 0 0.245",
         "quat": "0.70710678 -0.70710678 0 0",
     })
-    backing_size = tag_size_m * 1.28
+    board_width = (columns + 1) * square_size_m
+    board_height = (rows + 1) * square_size_m
+    margin = square_size_m * 0.35
     ET.SubElement(board_body, "geom", {
         "name": "calib_board_backing",
         "type": "box",
-        "size": f"{backing_size / 2:.9g} {backing_size / 2:.9g} 0.0015",
-        "material": "calib_tag_white",
+        "size": f"{board_width / 2 + margin:.9g} {board_height / 2 + margin:.9g} 0.0015",
+        "material": "calib_board_white",
         "contype": "0",
         "conaffinity": "0",
     })
-    grid = tag_module_grid(tag_id)
-    cell = tag_size_m / grid.shape[0]
-    for row in range(grid.shape[0]):
-        for col in range(grid.shape[1]):
-            if not grid[row, col]:
+    for row in range(rows + 1):
+        for col in range(columns + 1):
+            if (row + col) % 2 == 0:
                 continue
-            x = -tag_size_m / 2 + (col + 0.5) * cell
-            y = tag_size_m / 2 - (row + 0.5) * cell
+            x = -board_width / 2 + (col + 0.5) * square_size_m
+            y = board_height / 2 - (row + 0.5) * square_size_m
             ET.SubElement(board_body, "geom", {
-                "name": f"calib_tag_r{row}_c{col}",
+                "name": f"calib_square_r{row}_c{col}",
                 "type": "box",
                 "pos": f"{x:.9g} {y:.9g} 0.003",
-                "size": f"{cell * 0.515:.9g} {cell * 0.515:.9g} 0.0007",
-                "material": "calib_tag_black",
+                "size": f"{square_size_m * 0.502:.9g} {square_size_m * 0.502:.9g} 0.0007",
+                "material": "calib_board_black",
                 "contype": "0",
                 "conaffinity": "0",
             })
@@ -395,32 +377,29 @@ class SimApp:
         self.args = args
         self.width = int(args.width)
         self.height = int(args.height)
-        self.tag_size_mm = float(args.tag_size_mm)
+        self.square_size_mm = float(args.square_size_mm)
         self.data_dir = Path(args.output_dir).resolve() if args.output_dir else (
             HERE / "data" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
         )
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir = HERE / "third_party"
         panda_xml = ensure_panda_model(self.assets_dir)
-        make_tag_texture(panda_xml.parent / "calib_tag.png", args.tag_id, args.tag_texture_pixels)
         self.scene_xml = panda_xml.parent / "eye_to_hand_scene.xml"
         append_board_scene(
-            panda_xml, self.scene_xml, args.tag_id, self.tag_size_mm / 1000.0,
-            self.width, self.height
+            panda_xml,
+            self.scene_xml,
+            args.chessboard_columns,
+            args.chessboard_rows,
+            self.square_size_mm / 1000.0,
+            self.width,
+            self.height,
         )
         self.model = mujoco.MjModel.from_xml_path(str(self.scene_xml))
         self.data = mujoco.MjData(self.model)
         self.renderer: mujoco.Renderer | None = None
-        self.dictionary = cv2.aruco.getPredefinedDictionary(TAG_FAMILY)
-        self.detector = None
-        self.detector_params = None
-        if hasattr(cv2.aruco, "ArucoDetector"):
-            self.detector = cv2.aruco.ArucoDetector(
-                self.dictionary, cv2.aruco.DetectorParameters()
-            )
-        elif hasattr(cv2.aruco, "DetectorParameters_create"):
-            self.detector_params = cv2.aruco.DetectorParameters_create()
-        self.object_points = tag_points(self.tag_size_mm)
+        self.object_points = chessboard_object_points(
+            args.chessboard_columns, args.chessboard_rows, self.square_size_mm
+        )
         self.joints = DEFAULT_JOINTS.copy()
         self.lock = threading.RLock()
         self.frame_bgr: np.ndarray | None = None
@@ -468,9 +447,10 @@ class SimApp:
             "target_mount": "rigid_on_flange",
             "robot_pose": "T_base_flange",
             "output_transform": "T_base_camera",
-            "tag_family": TAG_FAMILY_NAME,
-            "tag_id": self.args.tag_id,
-            "tag_size_mm": self.tag_size_mm,
+            "target_type": TARGET_TYPE,
+            "chessboard_columns": self.args.chessboard_columns,
+            "chessboard_rows": self.args.chessboard_rows,
+            "square_size_mm": self.square_size_mm,
             "image_source": "mujoco.Renderer fixed camera",
             "mujoco_model_source": MENAGERIE_REPO,
             "mujoco_model_dir": str(self.assets_dir / PANDA_DIR),
@@ -529,48 +509,52 @@ class SimApp:
     def _analyze(self, bgr: np.ndarray) -> tuple[dict, np.ndarray]:
         overlay = bgr.copy()
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        corners, ids = self._detect_markers_multiscale(gray)
-        count = 0 if ids is None else int(np.asarray(ids).size)
-        if ids is not None and len(corners):
-            cv2.aruco.drawDetectedMarkers(overlay, corners, ids)
-        if ids is None or count != 1 or len(corners) != 1:
-            cv2.putText(overlay, f"invalid: tag_count={count}", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-            return {"valid": False, "reason": f"tag_count={count}", "tag_count": count}, overlay
-        image_points = corners[0].reshape(-1, 2).astype(np.float64)
-        ok, rvec, tvec = solve_pnp(self.object_points, image_points, self.intrinsics, cv2.SOLVEPNP_IPPE_SQUARE)
-        area = float(abs(cv2.contourArea(image_points.astype(np.float32))))
+        found, corners = self._detect_chessboard_multiscale(gray)
+        pattern = (self.args.chessboard_columns, self.args.chessboard_rows)
+        if not found or corners is None:
+            cv2.putText(overlay, "invalid: chessboard_not_found", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            return {"valid": False, "reason": "chessboard_not_found"}, overlay
+        cv2.drawChessboardCorners(overlay, pattern, corners, found)
+        image_points = corners.reshape(-1, 2).astype(np.float64)
+        ok, rvec, tvec = solve_pnp(self.object_points, image_points, self.intrinsics, cv2.SOLVEPNP_ITERATIVE)
+        x, y, width, height = cv2.boundingRect(image_points.astype(np.float32))
+        coverage = float(width * height) / float(gray.shape[0] * gray.shape[1])
         if not ok:
-            return {"valid": False, "reason": "solve_pnp_failed", "tag_count": count, "area_px": area}, overlay
+            return {"valid": False, "reason": "solve_pnp_failed", "coverage": coverage}, overlay
         rms = reprojection_rms_px(self.object_points, image_points, rvec, tvec, self.intrinsics)
-        valid = area >= self.args.min_tag_area_px and rms <= self.args.max_reprojection_px
-        reason = "ok" if valid else ("tag_too_small" if area < self.args.min_tag_area_px else "reprojection_high")
+        valid = coverage >= self.args.min_board_coverage and rms <= self.args.max_reprojection_px
+        reason = "ok" if valid else ("board_too_small" if coverage < self.args.min_board_coverage else "reprojection_high")
         color = (80, 220, 80) if valid else (0, 210, 255)
-        cv2.putText(overlay, f"{reason} rms={rms:.3f}px area={area:.0f}px", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.85, color, 2)
+        cv2.putText(overlay, f"{reason} rms={rms:.3f}px coverage={coverage:.1%}", (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.85, color, 2)
         return {
             "valid": bool(valid),
             "reason": reason,
-            "tag_count": count,
-            "tag_id": int(np.asarray(ids).reshape(-1)[0]),
-            "area_px": area,
+            "corner_count": int(image_points.shape[0]),
+            "coverage": coverage,
             "reprojection_rms_px": float(rms),
         }, overlay
 
-    def _detect_markers_multiscale(self, gray: np.ndarray):
+    def _detect_chessboard_multiscale(self, gray: np.ndarray):
+        pattern = (self.args.chessboard_columns, self.args.chessboard_rows)
+        flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+        if hasattr(cv2, "CALIB_CB_EXHAUSTIVE"):
+            flags |= cv2.CALIB_CB_EXHAUSTIVE
         for scale in (1.0, 0.75, 0.5):
             image = gray if scale == 1.0 else cv2.resize(gray, None, fx=scale, fy=scale)
-            if self.detector is not None:
-                corners, ids, _ = self.detector.detectMarkers(image)
-            else:
-                corners, ids, _ = cv2.aruco.detectMarkers(
-                    image, self.dictionary, parameters=self.detector_params
-                )
-            if ids is None or not len(corners):
+            found, corners = cv2.findChessboardCorners(image, pattern, flags)
+            if not found or corners is None:
                 continue
             if scale != 1.0:
-                corners = [(corner.astype(np.float64) / scale).astype(np.float32)
-                           for corner in corners]
-            return corners, ids
-        return [], None
+                corners = (corners.astype(np.float64) / scale).astype(np.float32)
+            corners = cv2.cornerSubPix(
+                gray,
+                corners,
+                (11, 11),
+                (-1, -1),
+                (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+            )
+            return True, corners
+        return False, None
 
     def status(self) -> dict:
         with self.lock:
@@ -596,15 +580,16 @@ class SimApp:
         return self.set_joints(DEFAULT_JOINTS.tolist())
 
     def _pose_is_reasonable(self, joints: np.ndarray) -> bool:
-        old_qpos = self.data.qpos.copy()
-        old_ctrl = self.data.ctrl.copy()
-        self.data.qpos[:7] = joints
-        self.data.ctrl[:7] = joints
-        mujoco.mj_forward(self.model, self.data)
-        hand_z = float(self.data.xpos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hand")][2])
-        self.data.qpos[:] = old_qpos
-        self.data.ctrl[:] = old_ctrl
-        mujoco.mj_forward(self.model, self.data)
+        with self.lock:
+            old_qpos = self.data.qpos.copy()
+            old_ctrl = self.data.ctrl.copy()
+            self.data.qpos[:7] = joints
+            self.data.ctrl[:7] = joints
+            mujoco.mj_forward(self.model, self.data)
+            hand_z = float(self.data.xpos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hand")][2])
+            self.data.qpos[:] = old_qpos
+            self.data.ctrl[:] = old_ctrl
+            mujoco.mj_forward(self.model, self.data)
         return hand_z > 0.18
 
     def capture(self) -> dict:
@@ -642,7 +627,7 @@ class SimApp:
                     f"{error['translation_mm']:.3f} mm / {error['rotation_deg']:.3f} deg"
                 )
             }
-        result = solve_from_data(self.data_dir, self.tag_size_mm, self.args.method)
+        result = self.solve_from_images()
         gt_path = self.data_dir / "ground_truth_T_base_camera.json"
         if gt_path.is_file():
             gt = np.asarray(json.loads(gt_path.read_text(encoding="utf-8"))["matrix_4x4"], dtype=np.float64)
@@ -657,6 +642,72 @@ class SimApp:
             write_json(self.data_dir / "T_base_camera.json", result)
             return {"message": f"求解完成，真值误差 {trans_mm:.3f} mm / {rot_deg:.3f} deg"}
         return {"message": "求解完成"}
+
+    def solve_from_images(self) -> dict:
+        pairs, skipped = [], []
+        for index in range(self.sample_count):
+            image_path = self.data_dir / f"frame_{index:03d}.png"
+            pose_path = self.data_dir / f"pose_{index:03d}.json"
+            if not image_path.is_file() or not pose_path.is_file():
+                skipped.append({"index": index, "reason": "missing_image_or_pose"})
+                continue
+            image = cv2.imread(str(image_path))
+            if image is None:
+                skipped.append({"index": index, "reason": "image_unreadable"})
+                continue
+            found, corners = self._detect_chessboard_multiscale(
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            )
+            if not found or corners is None:
+                skipped.append({"index": index, "reason": "chessboard_not_found"})
+                continue
+            image_points = corners.reshape(-1, 2).astype(np.float64)
+            ok, rvec, tvec = solve_pnp(
+                self.object_points, image_points, self.intrinsics, cv2.SOLVEPNP_ITERATIVE
+            )
+            if not ok:
+                skipped.append({"index": index, "reason": "solve_pnp_failed"})
+                continue
+            pairs.append({
+                "index": index,
+                "base_flange": load_robot_pose(pose_path),
+                "camera_target": matrix_from_pos_xmat(tvec, cv2.Rodrigues(rvec)[0]),
+                "reprojection_rms_px": reprojection_rms_px(
+                    self.object_points, image_points, rvec, tvec, self.intrinsics
+                ),
+            })
+        if len(pairs) < 8:
+            raise RuntimeError(f"棋盘格有效样本不足：{len(pairs)} < 8")
+        method_name = self.args.method.upper()
+        base_camera = solve_matrix(pairs, METHODS[method_name])
+        metrics = evaluate_matrix(pairs, base_camera)
+        rpy_deg = Rotation.from_matrix(base_camera[:3, :3]).as_euler("xyz", degrees=True)
+        result = {
+            "schema_version": 1,
+            "transform": "T_base_camera",
+            "meaning": "OpenCV camera coordinates to MuJoCo world/base coordinates",
+            "calibration_type": "eye_to_hand",
+            "method": method_name,
+            "source": "chessboard_image_pnp",
+            "validated": False,
+            "source_dir": str(self.data_dir),
+            "robot_id": "mujoco_franka_emika_panda",
+            "target_type": TARGET_TYPE,
+            "chessboard_columns": self.args.chessboard_columns,
+            "chessboard_rows": self.args.chessboard_rows,
+            "square_size_mm": self.square_size_mm,
+            "recorded_sample_count": self.sample_count,
+            "valid_sample_count": len(pairs),
+            "valid_indices": [item["index"] for item in pairs],
+            "skipped": skipped,
+            "matrix_4x4": base_camera.tolist(),
+            "matrix_4x4_flat": base_camera.flatten().tolist(),
+            "xyz_m": base_camera[:3, 3].tolist(),
+            "rpy_deg": rpy_deg.tolist(),
+            "consistency": metrics,
+        }
+        write_json(self.data_dir / "T_base_camera.json", result)
+        return result
 
     def solve_from_truth_targets(self) -> dict:
         pairs = []
@@ -697,9 +748,10 @@ class SimApp:
             "validated": True,
             "source_dir": str(self.data_dir),
             "robot_id": "mujoco_franka_emika_panda",
-            "tag_family": TAG_FAMILY_NAME,
-            "tag_id": self.args.tag_id,
-            "tag_size_mm": self.tag_size_mm,
+            "target_type": TARGET_TYPE,
+            "chessboard_columns": self.args.chessboard_columns,
+            "chessboard_rows": self.args.chessboard_rows,
+            "square_size_mm": self.square_size_mm,
             "valid_sample_count": len(pairs),
             "valid_indices": [item["index"] for item in pairs],
             "matrix_4x4": base_camera.tolist(),
@@ -791,10 +843,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--output-dir")
-    parser.add_argument("--tag-id", type=int, default=0)
-    parser.add_argument("--tag-size-mm", type=float, default=90.0)
-    parser.add_argument("--tag-texture-pixels", type=int, default=512)
-    parser.add_argument("--min-tag-area-px", type=float, default=700.0)
+    parser.add_argument("--chessboard-columns", type=int, default=7,
+                        help="number of inner corners along the board X direction")
+    parser.add_argument("--chessboard-rows", type=int, default=6,
+                        help="number of inner corners along the board Y direction")
+    parser.add_argument("--square-size-mm", type=float, default=40.0)
+    parser.add_argument("--min-board-coverage", type=float, default=0.015)
     parser.add_argument("--max-reprojection-px", type=float, default=2.0)
     parser.add_argument("--method", choices=sorted(METHODS), default="PARK")
     parser.add_argument("--solve-source", choices=["truth", "image"], default="truth")
@@ -805,8 +859,12 @@ def main() -> int:
     args = parse_args()
     if args.width <= 0 or args.height <= 0:
         raise SystemExit("--width/--height must be positive")
-    if args.tag_size_mm <= 0:
-        raise SystemExit("--tag-size-mm must be positive")
+    if args.chessboard_columns < 3 or args.chessboard_rows < 3:
+        raise SystemExit("--chessboard-columns/--chessboard-rows must be at least 3")
+    if args.square_size_mm <= 0:
+        raise SystemExit("--square-size-mm must be positive")
+    if not 0.0 <= args.min_board_coverage <= 1.0:
+        raise SystemExit("--min-board-coverage must be between 0 and 1")
     try:
         sim = SimApp(args)
     except (OSError, RuntimeError, URLError, mujoco.FatalError) as exc:
