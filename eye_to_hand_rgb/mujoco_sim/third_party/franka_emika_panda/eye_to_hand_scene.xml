@@ -273,4 +273,4 @@
   <contact>
     <exclude body1="link0" body2="link1" />
   </contact>
-<visual><headlight diffuse="0.6 0.6 0.6" ambient="0.35 0.35 0.35" specular="0 0 0" /><global offwidth="1280" offheight="720" /></visual></mujoco>
+<visual><headlight diffuse="0.6 0.6 0.6" ambient="0.35 0.35 0.35" specular="0 0 0" /><global offwidth="640" offheight="480" /></visual></mujoco>
