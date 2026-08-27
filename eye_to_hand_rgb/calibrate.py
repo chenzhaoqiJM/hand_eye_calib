@@ -167,13 +167,25 @@ def save_pose(data_dir: Path, index: int, pose: np.ndarray) -> None:
 
 
 def collect(args: argparse.Namespace) -> Path:
-    intrinsics_source = Path(args.intrinsics).resolve()
-    intrinsics = load_intrinsics(intrinsics_source)
+    intrinsics_source = (
+        None if args.intrinsics is None else Path(args.intrinsics).resolve()
+    )
+    intrinsics = None if intrinsics_source is None else load_intrinsics(intrinsics_source)
     data_dir = Path(args.output_dir).resolve() if args.output_dir else (
         HERE / "data" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
     )
     data_dir.mkdir(parents=True, exist_ok=True)
-    camera = Camera(args.device, args.width, args.height, args.fps, args.pixel_format)
+    if args.camera_backend == "realsense":
+        from camera_realsense import RealSenseCamera
+
+        camera = RealSenseCamera(
+            width=args.width,
+            height=args.height,
+            fps=args.fps,
+            serial_number=args.serial_number,
+        )
+    else:
+        camera = Camera(args.device, args.width, args.height, args.fps, args.pixel_format)
     if args.target_type == "chessboard":
         target_detector = None
         target_points = chessboard_object_points(
@@ -187,6 +199,8 @@ def collect(args: argparse.Namespace) -> Path:
     try:
         camera.start()
         width, height = camera.resolution
+        if intrinsics is None:
+            intrinsics = camera.intrinsics_payload
         validate_intrinsics(intrinsics, width, height)
         write_json(data_dir / "intrinsics.json", intrinsics)
         write_json(data_dir / "session.json", {
@@ -204,7 +218,11 @@ def collect(args: argparse.Namespace) -> Path:
             "square_size_mm": args.square_size_mm if args.target_type == "chessboard" else None,
             "camera_device": camera.device_info,
             "camera_stream": camera.stream_config,
-            "intrinsics_source": str(intrinsics_source),
+            "camera_backend": args.camera_backend,
+            "intrinsics_source": (
+                str(intrinsics_source)
+                if intrinsics_source is not None else "realsense_device"
+            ),
             "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         })
         def process_preview(frame: np.ndarray) -> np.ndarray:
@@ -337,10 +355,15 @@ def collect(args: argparse.Namespace) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="V4L2 RGB eye-to-hand collection and T_base_camera calibration"
+        description="RGB eye-to-hand collection and T_base_camera calibration"
     )
+    parser.add_argument("--camera-backend", choices=["v4l2", "realsense"], default="v4l2",
+                        help="camera backend; default: v4l2")
     parser.add_argument("--device", default="/dev/video0")
-    parser.add_argument("--intrinsics", required=True, help="RGB camera intrinsics JSON")
+    parser.add_argument("--serial-number", default=None,
+                        help="RealSense serial number when --camera-backend=realsense")
+    parser.add_argument("--intrinsics", default=None,
+                        help="RGB camera intrinsics JSON; required for V4L2, optional for RealSense")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
@@ -367,6 +390,8 @@ def main() -> int:
     parser.add_argument("--method", choices=["TSAI", "PARK", "HORAUD", "ANDREFF", "DANIILIDIS"], default="PARK")
     parser.add_argument("--no-solve", action="store_true")
     args = parser.parse_args()
+    if args.camera_backend == "v4l2" and args.intrinsics is None:
+        parser.error("--intrinsics is required when --camera-backend=v4l2")
     if args.min_samples < 8:
         parser.error("--min-samples must be at least 8")
     if not np.isfinite(args.tag_size_mm) or args.tag_size_mm <= 0:

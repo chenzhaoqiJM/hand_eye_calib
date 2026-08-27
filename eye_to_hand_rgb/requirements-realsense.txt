@@ -1,0 +1,2 @@
+# Install this file in addition to requirements.txt for RealSense support.
+pyrealsense2
