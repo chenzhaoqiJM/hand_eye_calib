@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Solve eye-to-hand calibration from RGB images and flange poses.
 
-Robot poses are T_base_flange. The AprilTag is rigidly attached to the flange.
+Robot poses are T_base_flange. The target is rigidly attached to the flange.
 PnP estimates T_camera_target. The output is T_base_camera (camera -> base).
+
+Both a single AprilTag and a chessboard target are supported. Chessboard
+dimensions refer to the number of inner corners, not the number of squares.
 """
 
 from __future__ import annotations
@@ -21,6 +24,9 @@ from camera_model import reprojection_rms_px, solve_pnp, validate_intrinsics
 
 
 DEFAULT_TAG_SIZE_MM = 50.0
+DEFAULT_CHESSBOARD_COLUMNS = 7
+DEFAULT_CHESSBOARD_ROWS = 6
+DEFAULT_SQUARE_SIZE_MM = 40.0
 MIN_VALID_PAIRS = 8
 TAG_FAMILY = cv2.aruco.DICT_APRILTAG_36h11
 TAG_FAMILY_NAME = "DICT_APRILTAG_36h11"
@@ -58,6 +64,29 @@ def tag_points(size_mm: float) -> np.ndarray:
          [half, -half, 0.0], [-half, -half, 0.0]],
         dtype=np.float64,
     )
+
+
+def chessboard_object_points(
+    columns: int, rows: int, square_size_mm: float
+) -> np.ndarray:
+    """Return board points in the same centered convention as the simulator."""
+    if int(columns) != columns or int(rows) != rows:
+        raise ValueError("chessboard columns and rows must be integers")
+    columns, rows = int(columns), int(rows)
+    if columns < 3 or rows < 3:
+        raise ValueError("chessboard columns and rows must be at least 3")
+    if not np.isfinite(square_size_mm) or square_size_mm <= 0:
+        raise ValueError("square_size_mm must be positive")
+    square = float(square_size_mm) / 1000.0
+    board_width = (columns + 1) * square
+    board_height = (rows + 1) * square
+    points = np.zeros((columns * rows, 3), dtype=np.float64)
+    for row in range(rows):
+        for col in range(columns):
+            offset = row * columns + col
+            points[offset, 0] = -board_width / 2.0 + (col + 1) * square
+            points[offset, 1] = board_height / 2.0 - (row + 1) * square
+    return points
 
 
 def load_json(path: Path) -> dict:
@@ -178,6 +207,31 @@ def detect_markers_multiscale(gray: np.ndarray, detector: dict):
     return [], None, []
 
 
+def detect_chessboard_multiscale(
+    gray: np.ndarray, columns: int, rows: int
+):
+    pattern = (columns, rows)
+    flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+    if hasattr(cv2, "CALIB_CB_EXHAUSTIVE"):
+        flags |= cv2.CALIB_CB_EXHAUSTIVE
+    for scale in (1.0, 0.75, 0.5):
+        image = gray if scale == 1.0 else cv2.resize(gray, None, fx=scale, fy=scale)
+        found, corners = cv2.findChessboardCorners(image, pattern, flags)
+        if not found or corners is None:
+            continue
+        if scale != 1.0:
+            corners = (corners.astype(np.float64) / scale).astype(np.float32)
+        corners = cv2.cornerSubPix(
+            gray,
+            corners,
+            (11, 11),
+            (-1, -1),
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+        )
+        return True, corners
+    return False, None
+
+
 def recorded_indices(data_dir: Path) -> list[int]:
     pattern = re.compile(r"frame_(\d{3})\.(png|jpg|jpeg|bmp)$", re.IGNORECASE)
     return sorted(
@@ -194,33 +248,85 @@ def recorded_image_path(data_dir: Path, index: int) -> Path | None:
     return None
 
 
-def detect_target_pose(image, detector, intrinsics: dict, object_points: np.ndarray):
-    corners, ids, _ = detect_markers_multiscale(
-        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), detector
-    )
-    count = 0 if ids is None else int(np.asarray(ids).size)
-    if ids is None or count != 1 or len(corners) != 1:
-        return None, {"reason": "tag_count_not_one", "tag_count": count}
-    image_points = corners[0].reshape(-1, 2).astype(np.float64)
+def detect_target_pose(
+    image,
+    detector,
+    intrinsics: dict,
+    object_points: np.ndarray,
+    target_type: str = "apriltag",
+    chessboard_columns: int | None = None,
+    chessboard_rows: int | None = None,
+):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    target_type = target_type.lower()
+    if target_type == "chessboard":
+        if chessboard_columns is None or chessboard_rows is None:
+            raise ValueError("chessboard dimensions are required")
+        found, corners = detect_chessboard_multiscale(
+            gray, chessboard_columns, chessboard_rows
+        )
+        if not found or corners is None:
+            return None, {"reason": "chessboard_not_found"}
+        image_points = corners.reshape(-1, 2).astype(np.float64)
+        target_metadata = {
+            "target_type": "chessboard",
+            "corner_count": int(image_points.shape[0]),
+        }
+    elif target_type == "apriltag":
+        corners, ids, _ = detect_markers_multiscale(gray, detector)
+        count = 0 if ids is None else int(np.asarray(ids).size)
+        if ids is None or count != 1 or len(corners) != 1:
+            return None, {"reason": "tag_count_not_one", "tag_count": count}
+        image_points = corners[0].reshape(-1, 2).astype(np.float64)
+        target_metadata = {
+            "target_type": "apriltag",
+            "tag_id": int(np.asarray(ids).reshape(-1)[0]),
+        }
+    else:
+        raise ValueError("target_type must be 'apriltag' or 'chessboard'")
     ok, rvec, tvec = solve_pnp(
         object_points, image_points, intrinsics, cv2.SOLVEPNP_IPPE_SQUARE
+        if target_type == "apriltag" else cv2.SOLVEPNP_ITERATIVE
     )
     if not ok:
         return None, {"reason": "solve_pnp_failed"}
-    return {
-        "tag_id": int(np.asarray(ids).reshape(-1)[0]),
+    target = {
+        **target_metadata,
         "camera_target": transform(cv2.Rodrigues(rvec)[0], tvec),
         "reprojection_rms_px": reprojection_rms_px(
             object_points, image_points, rvec, tvec, intrinsics
         ),
-    }, None
+    }
+    if target_type == "chessboard":
+        x, y, width, height = cv2.boundingRect(image_points.astype(np.float32))
+        del x, y
+        target["coverage"] = float(width * height) / float(gray.shape[0] * gray.shape[1])
+    return target, None
 
 
-def collect_pairs(data_dir: Path, tag_size_mm: float):
+def collect_pairs(
+    data_dir: Path,
+    tag_size_mm: float | None = None,
+    target_type: str = "apriltag",
+    chessboard_columns: int = DEFAULT_CHESSBOARD_COLUMNS,
+    chessboard_rows: int = DEFAULT_CHESSBOARD_ROWS,
+    square_size_mm: float = DEFAULT_SQUARE_SIZE_MM,
+):
+    target_type = target_type.lower()
+    if target_type not in ("apriltag", "chessboard"):
+        raise ValueError("target_type must be 'apriltag' or 'chessboard'")
     intrinsics = load_json(data_dir / "intrinsics.json")
     validate_intrinsics(intrinsics)
-    detector = create_tag_detector()
-    points = tag_points(tag_size_mm)
+    if target_type == "apriltag":
+        if tag_size_mm is None:
+            raise ValueError("tag_size_mm is required for AprilTag")
+        detector = create_tag_detector()
+        points = tag_points(tag_size_mm)
+    else:
+        detector = None
+        points = chessboard_object_points(
+            chessboard_columns, chessboard_rows, square_size_mm
+        )
     pairs, skipped = [], []
     expected_tag_id = None
     indices = recorded_indices(data_dir)
@@ -234,17 +340,26 @@ def collect_pairs(data_dir: Path, tag_size_mm: float):
         if not pose_path.is_file():
             skipped.append({"index": index, "reason": "pose_missing"})
             continue
-        target, rejection = detect_target_pose(image, detector, intrinsics, points)
+        target, rejection = detect_target_pose(
+            image,
+            detector,
+            intrinsics,
+            points,
+            target_type,
+            chessboard_columns,
+            chessboard_rows,
+        )
         if target is None:
             skipped.append({"index": index, **rejection})
             continue
-        tag_id = target["tag_id"]
-        if expected_tag_id is None:
-            expected_tag_id = tag_id
-        if tag_id != expected_tag_id:
-            skipped.append({"index": index, "reason": "tag_id_mismatch",
-                            "expected": expected_tag_id, "actual": tag_id})
-            continue
+        if target_type == "apriltag":
+            tag_id = target["tag_id"]
+            if expected_tag_id is None:
+                expected_tag_id = tag_id
+            if tag_id != expected_tag_id:
+                skipped.append({"index": index, "reason": "tag_id_mismatch",
+                                "expected": expected_tag_id, "actual": tag_id})
+                continue
         try:
             base_flange = load_robot_pose(pose_path)
         except (OSError, ValueError) as exc:
@@ -300,25 +415,68 @@ def evaluate_matrix(pairs: list[dict], base_camera: np.ndarray) -> dict:
 
 
 def solve_from_data(
-    data_dir: str | Path, tag_size_mm: float | None = None, method_name: str = "PARK"
+    data_dir: str | Path,
+    tag_size_mm: float | None = None,
+    method_name: str = "PARK",
+    target_type: str | None = None,
+    chessboard_columns: int | None = None,
+    chessboard_rows: int | None = None,
+    square_size_mm: float | None = None,
 ) -> dict:
     path = Path(data_dir).resolve()
     if not path.is_dir():
         raise FileNotFoundError(f"Data directory does not exist: {path}")
     session_path = path / "session.json"
     session = load_json(session_path) if session_path.is_file() else {}
+    session_target_type = str(session.get("target_type", "apriltag")).lower()
+    target = session_target_type if target_type is None else target_type.lower()
+    if target not in ("apriltag", "chessboard"):
+        raise ValueError("target_type must be 'apriltag' or 'chessboard'")
+    if target_type is not None and "target_type" in session and target != session_target_type:
+        raise ValueError("--target-type does not match session.json")
+
     session_size = session.get("tag_size_mm")
     size = float(session_size if tag_size_mm is None and session_size is not None
                  else DEFAULT_TAG_SIZE_MM if tag_size_mm is None else tag_size_mm)
-    if session_size is not None and tag_size_mm is not None and not np.isclose(size, session_size):
+    if target == "apriltag" and session_size is not None and tag_size_mm is not None and not np.isclose(size, session_size):
         raise ValueError("--tag-size-mm does not match session.json")
+    columns = int(session.get("chessboard_columns", DEFAULT_CHESSBOARD_COLUMNS)
+                  if chessboard_columns is None else chessboard_columns)
+    rows = int(session.get("chessboard_rows", DEFAULT_CHESSBOARD_ROWS)
+               if chessboard_rows is None else chessboard_rows)
+    square = float(session.get("square_size_mm", DEFAULT_SQUARE_SIZE_MM)
+                   if square_size_mm is None else square_size_mm)
+    for name, value, session_key in (
+        ("--chessboard-columns", columns, "chessboard_columns"),
+        ("--chessboard-rows", rows, "chessboard_rows"),
+        ("--square-size-mm", square, "square_size_mm"),
+    ):
+        if chessboard_columns is not None and session_key == "chessboard_columns" and int(value) != int(session[session_key]):
+            raise ValueError(f"{name} does not match session.json")
+        if chessboard_rows is not None and session_key == "chessboard_rows" and int(value) != int(session[session_key]):
+            raise ValueError(f"{name} does not match session.json")
+        if square_size_mm is not None and session_key == "square_size_mm" and not np.isclose(value, session[session_key]):
+            raise ValueError(f"{name} does not match session.json")
+    if target == "chessboard":
+        chessboard_object_points(columns, rows, square)
     method_name = method_name.upper()
     if method_name not in METHODS:
         raise ValueError(f"Unknown method: {method_name}")
 
-    pairs, skipped, tag_id, intrinsics, indices = collect_pairs(path, size)
+    pairs, skipped, tag_id, _, indices = collect_pairs(
+        path,
+        size if target == "apriltag" else None,
+        target,
+        columns,
+        rows,
+        square,
+    )
     for item in pairs:
-        print(f"  [{item['index']:03d}] OK tag_id={item['tag_id']} "
+        target_info = (
+            f"tag_id={item['tag_id']}" if target == "apriltag"
+            else f"corners={item['corner_count']}"
+        )
+        print(f"  [{item['index']:03d}] OK {target_info} "
               f"pnp_rms={item['reprojection_rms_px']:.3f}px")
     for item in skipped:
         print(f"  [{item['index']:03d}] skipped: {item['reason']}")
@@ -341,9 +499,13 @@ def solve_from_data(
         "source_dir": str(path),
         "result_path": str(result_path),
         "robot_id": session.get("robot_id"),
-        "tag_family": TAG_FAMILY_NAME,
-        "tag_id": tag_id,
-        "tag_size_mm": size,
+        "target_type": target,
+        "tag_family": TAG_FAMILY_NAME if target == "apriltag" else None,
+        "tag_id": tag_id if target == "apriltag" else None,
+        "tag_size_mm": size if target == "apriltag" else None,
+        "chessboard_columns": columns if target == "chessboard" else None,
+        "chessboard_rows": rows if target == "chessboard" else None,
+        "square_size_mm": square if target == "chessboard" else None,
         "recorded_sample_count": len(indices),
         "valid_sample_count": len(pairs),
         "valid_indices": [item["index"] for item in pairs],
@@ -369,7 +531,14 @@ def solve_from_data(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Solve eye-to-hand T_base_camera")
     parser.add_argument("data_dir")
+    parser.add_argument("--target-type", choices=["apriltag", "chessboard"], default=None,
+                        help="target type; defaults to session.json when present")
     parser.add_argument("--tag-size-mm", type=float, default=None)
+    parser.add_argument("--chessboard-columns", type=int, default=None,
+                        help="number of chessboard inner corners along X")
+    parser.add_argument("--chessboard-rows", type=int, default=None,
+                        help="number of chessboard inner corners along Y")
+    parser.add_argument("--square-size-mm", type=float, default=None)
     parser.add_argument("--method", choices=sorted(METHODS), default="PARK")
     parser.add_argument("--poses-csv")
     parser.add_argument("--position-unit", choices=["m", "mm"], default="m")
@@ -381,7 +550,15 @@ def main() -> int:
                 args.poses_csv, args.data_dir, args.position_unit, args.angle_unit
             )
             print(f"Imported {len(imported)} poses")
-        solve_from_data(args.data_dir, args.tag_size_mm, args.method)
+        solve_from_data(
+            args.data_dir,
+            args.tag_size_mm,
+            args.method,
+            args.target_type,
+            args.chessboard_columns,
+            args.chessboard_rows,
+            args.square_size_mm,
+        )
     except (FileNotFoundError, OSError, ValueError, RuntimeError, cv2.error) as exc:
         raise SystemExit(str(exc)) from exc
     return 0

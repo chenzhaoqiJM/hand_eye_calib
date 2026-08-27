@@ -11,7 +11,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from calibrate_from_data import normalize_pose_units, solve_from_data
+from calibrate_from_data import (
+    chessboard_object_points,
+    create_tag_detector,
+    detect_target_pose,
+    normalize_pose_units,
+    solve_from_data,
+    tag_points,
+)
 from camera import Camera
 from camera_model import validate_intrinsics
 from preview import FrameStream, PreviewServer, preview_urls
@@ -74,6 +81,14 @@ def collect(args: argparse.Namespace) -> Path:
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     camera = Camera(args.device, args.width, args.height, args.fps, args.pixel_format)
+    if args.target_type == "chessboard":
+        target_detector = None
+        target_points = chessboard_object_points(
+            args.chessboard_columns, args.chessboard_rows, args.square_size_mm
+        )
+    else:
+        target_detector = create_tag_detector()
+        target_points = tag_points(args.tag_size_mm)
     frame_stream: FrameStream | None = None
     preview_server: PreviewServer | None = None
     try:
@@ -88,8 +103,12 @@ def collect(args: argparse.Namespace) -> Path:
             "target_mount": "rigid_on_flange",
             "robot_pose": "T_base_flange",
             "output_transform": "T_base_camera",
-            "tag_family": "DICT_APRILTAG_36h11",
-            "tag_size_mm": args.tag_size_mm,
+            "target_type": args.target_type,
+            "tag_family": "DICT_APRILTAG_36h11" if args.target_type == "apriltag" else None,
+            "tag_size_mm": args.tag_size_mm if args.target_type == "apriltag" else None,
+            "chessboard_columns": args.chessboard_columns if args.target_type == "chessboard" else None,
+            "chessboard_rows": args.chessboard_rows if args.target_type == "chessboard" else None,
+            "square_size_mm": args.square_size_mm if args.target_type == "chessboard" else None,
             "camera_device": camera.device_info,
             "camera_stream": camera.stream_config,
             "intrinsics_source": str(intrinsics_source),
@@ -106,7 +125,8 @@ def collect(args: argparse.Namespace) -> Path:
             print("Browser preview:")
             for url in preview_urls(args.preview_host, preview_server.port):
                 print(f"  {url}")
-        print("AprilTag must be rigidly attached to the flange and visible to the fixed camera.")
+        target_name = "AprilTag" if args.target_type == "apriltag" else "Chessboard"
+        print(f"{target_name} must be rigidly attached to the flange and visible to the fixed camera.")
         print("Use varied flange positions and rotations; stop the robot before each capture.")
 
         index = 0
@@ -121,6 +141,35 @@ def collect(args: argparse.Namespace) -> Path:
                 print("Use Enter to capture or q to finish.")
                 continue
             image = frame_stream.snapshot()
+            target, rejection = detect_target_pose(
+                image,
+                target_detector,
+                intrinsics,
+                target_points,
+                args.target_type,
+                args.chessboard_columns,
+                args.chessboard_rows,
+            )
+            if target is None:
+                print(f"  Capture rejected: {rejection['reason']}")
+                continue
+            if target["reprojection_rms_px"] > args.max_reprojection_px:
+                print(
+                    f"  Capture rejected: reprojection RMS "
+                    f"{target['reprojection_rms_px']:.3f}px > {args.max_reprojection_px:.3f}px"
+                )
+                continue
+            if args.target_type == "chessboard":
+                print(
+                    f"  Chessboard OK: {target['corner_count']} corners, "
+                    f"PnP RMS {target['reprojection_rms_px']:.3f}px, "
+                    f"coverage {target['coverage']:.1%}"
+                )
+            else:
+                print(
+                    f"  AprilTag OK: id={target['tag_id']}, "
+                    f"PnP RMS {target['reprojection_rms_px']:.3f}px"
+                )
             image_path = data_dir / f"frame_{index:03d}.png"
             write_image(image_path, image)
             print(f"  Saved {image_path.name}")
@@ -158,7 +207,15 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pixel-format", default="MJPG", help="V4L2 FourCC, e.g. MJPG/YUYV")
+    parser.add_argument("--target-type", choices=["apriltag", "chessboard"], default="apriltag")
     parser.add_argument("--tag-size-mm", type=float, default=50.0)
+    parser.add_argument("--chessboard-columns", type=int, default=7,
+                        help="number of chessboard inner corners along X")
+    parser.add_argument("--chessboard-rows", type=int, default=6,
+                        help="number of chessboard inner corners along Y")
+    parser.add_argument("--square-size-mm", type=float, default=40.0)
+    parser.add_argument("--max-reprojection-px", type=float, default=2.0,
+                        help="reject captures whose PnP RMS exceeds this value")
     parser.add_argument("--min-samples", type=int, default=15)
     parser.add_argument("--robot-id", default=None)
     parser.add_argument("--position-unit", choices=["m", "mm"], default="mm")
@@ -174,13 +231,27 @@ def main() -> int:
         parser.error("--min-samples must be at least 8")
     if not np.isfinite(args.tag_size_mm) or args.tag_size_mm <= 0:
         parser.error("--tag-size-mm must be positive")
+    if args.chessboard_columns < 3 or args.chessboard_rows < 3:
+        parser.error("--chessboard-columns/--chessboard-rows must be at least 3")
+    if not np.isfinite(args.square_size_mm) or args.square_size_mm <= 0:
+        parser.error("--square-size-mm must be positive")
+    if not np.isfinite(args.max_reprojection_px) or args.max_reprojection_px <= 0:
+        parser.error("--max-reprojection-px must be positive")
     if not 1 <= args.preview_port <= 65535:
         parser.error("--preview-port must be between 1 and 65535")
     try:
         data_dir = collect(args)
         print(f"\nCollection complete: {data_dir}")
         if not args.no_solve:
-            solve_from_data(data_dir, args.tag_size_mm, args.method)
+            solve_from_data(
+                data_dir,
+                args.tag_size_mm,
+                args.method,
+                target_type=args.target_type,
+                chessboard_columns=args.chessboard_columns,
+                chessboard_rows=args.chessboard_rows,
+                square_size_mm=args.square_size_mm,
+            )
     except (OSError, ValueError, RuntimeError, cv2.error) as exc:
         raise SystemExit(str(exc)) from exc
     return 0
