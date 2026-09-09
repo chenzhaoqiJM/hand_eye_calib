@@ -74,6 +74,7 @@ python live_homography_web.py \
   --fps 30 \
   --pattern 7x4 \
   --square-size 24 \
+  --square-unit mm \
   --intrinsics ../monocular_rgb_calibration/intrinsics.json \
   --output pixel_to_plane_homography.json \
   --port 8080
@@ -100,15 +101,22 @@ python live_homography_web.py --device /dev/video4 \
 
 程序启动时会验证摄像头能否打开、实际分辨率是否等于 `--width`/`--height`，以及内参文件是否匹配。任一项失败都会直接退出；这不是棋盘检测失败。使用 V4L2 设备时，确认当前用户有权限访问 `/dev/video4`，并先用 `v4l2-ctl --list-formats-ext -d /dev/video4` 查看支持的分辨率。
 
-计算完成后，页面会冻结并显示本次用于标定的图像，以红色十字标出实际坐标原点。此时可使用：
+计算完成后，页面会冻结并显示本次用于标定的图像，以红色十字标出实际坐标原点，并绘制三维坐标轴：X 红色（沿棋盘列）、Y 绿色（沿棋盘行）、Z 蓝色（右手系法向）。轴长为两个棋盘方格。此时可使用：
 
 - **Measure point**：点击图像，查看像素坐标及其对应的实际二维坐标。
 - **Measure distance**：依次点击 A、B 两点，查看两点实际坐标及平面距离。
 - **Clear marks**：清除当前测量标记。
 
-测量结果的单位与 `--square-size` 一致。浏览器中图像即使被缩放，点击位置也会换算回相机原始像素坐标。再次点击 **Calculate mapping matrix** 可用当前视频帧重新标定。
+测量结果的单位由 `--square-unit {mm,cm,m}` 指定，默认是 `mm`。浏览器中图像即使被缩放，点击位置也会换算回相机原始像素坐标。再次点击 **Calculate mapping matrix** 可用当前视频帧重新标定。
 
 实时页面中显示的相机坐标由 `matrix_camera_plane` 计算，表示棋盘平面坐标点在相机坐标系中的位置。默认情况下，该位姿使用零畸变参数计算；只有在未去畸变并使用 `--no-zero-distortion` 时，才使用内参文件中的原始畸变参数。该位姿仅用于测量显示；像素到平面的主要结果是 `matrix_pixel_to_plane`。
+
+点击计算后，页面还会直接显示相机相对于棋盘格的 `x/y/z`、固定轴 `roll/pitch/yaw` 和 ROS 2 四元数。`camera_pose_in_chessboard` 使用 `--square-unit` 指定的长度单位；`ros2_transforms` 中的平移则按照 REP-103 统一换算为米，并同时提供：
+
+- `chessboard -> camera_optical_frame`：x 向右、y 向下、z 向前。
+- `chessboard -> camera_link`：x 向前、y 向左、z 向上。
+
+两项都可按其中的 `parent_frame`、`child_frame`、`translation` 和 `rotation_quaternion_xyzw` 发布为 tf2 变换。棋盘坐标系采用 x 沿列、y 沿行、z=x×y 的右手约定。
 
 ## 输出 JSON
 
@@ -120,7 +128,7 @@ python live_homography_web.py --device /dev/video4 \
 - `image_size`、`pattern_inner_corners`：矩阵适用的图像尺寸和棋盘参数。
 - `inlier_count`、`corner_count`、`mean_reprojection_error`、`max_reprojection_error`：RANSAC 内点和重投影误差。
 
-实时模式还会写入 `plane_origin_pixel`、`matrix_camera_plane`、`camera_coordinate_unit`、`pnp_reprojection_rms` 和 `undistorted`。应用读取矩阵时，应使用输出中的图像尺寸；更换摄像头分辨率、镜头位置或工作平面后必须重新标定。
+实时模式还会写入 `plane_origin_pixel`、`matrix_camera_plane`（兼容旧名称）、`matrix_camera_optical_chessboard`、`matrix_chessboard_camera_optical`、`camera_pose_in_chessboard`、`ros2_transforms`、`pnp_reprojection_rms` 和 `undistorted`。矩阵名采用 `matrix_目标坐标系_源坐标系` 语义。应用读取矩阵时，应使用输出中的图像尺寸；更换摄像头分辨率、镜头位置或工作平面后必须重新标定。
 
 ## 3. 交互式查询坐标
 

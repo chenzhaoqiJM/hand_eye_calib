@@ -7,6 +7,7 @@ import argparse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import threading
 
@@ -27,11 +28,101 @@ from homography_common import (
 )
 
 
+def _rotation_to_quaternion_xyzw(rotation: np.ndarray) -> list[float]:
+    """Convert a rotation matrix to the quaternion ordering used by ROS 2."""
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * scale
+        qx = (rotation[2, 1] - rotation[1, 2]) / scale
+        qy = (rotation[0, 2] - rotation[2, 0]) / scale
+        qz = (rotation[1, 0] - rotation[0, 1]) / scale
+    else:
+        index = int(np.argmax(np.diag(rotation)))
+        if index == 0:
+            scale = math.sqrt(
+                1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]
+            ) * 2.0
+            qw = (rotation[2, 1] - rotation[1, 2]) / scale
+            qx = 0.25 * scale
+            qy = (rotation[0, 1] + rotation[1, 0]) / scale
+            qz = (rotation[0, 2] + rotation[2, 0]) / scale
+        elif index == 1:
+            scale = math.sqrt(
+                1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]
+            ) * 2.0
+            qw = (rotation[0, 2] - rotation[2, 0]) / scale
+            qx = (rotation[0, 1] + rotation[1, 0]) / scale
+            qy = 0.25 * scale
+            qz = (rotation[1, 2] + rotation[2, 1]) / scale
+        else:
+            scale = math.sqrt(
+                1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]
+            ) * 2.0
+            qw = (rotation[1, 0] - rotation[0, 1]) / scale
+            qx = (rotation[0, 2] + rotation[2, 0]) / scale
+            qy = (rotation[1, 2] + rotation[2, 1]) / scale
+            qz = 0.25 * scale
+    quaternion = np.asarray([qx, qy, qz, qw], dtype=np.float64)
+    quaternion /= np.linalg.norm(quaternion)
+    return quaternion.tolist()
+
+
+def _rotation_to_rpy(rotation: np.ndarray) -> list[float]:
+    """Return ROS fixed-axis roll, pitch, yaw angles, in radians."""
+    horizontal = math.hypot(float(rotation[0, 0]), float(rotation[1, 0]))
+    pitch = math.atan2(-float(rotation[2, 0]), horizontal)
+    if horizontal > 1e-9:
+        roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
+        yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+    else:
+        # At gimbal lock use the equivalent solution with yaw fixed to zero.
+        roll = math.atan2(-float(rotation[1, 2]), float(rotation[1, 1]))
+        yaw = 0.0
+    return [roll, pitch, yaw]
+
+
+def _ros_transform_payload(
+    transform: np.ndarray,
+    parent_frame: str,
+    child_frame: str,
+    unit: str,
+) -> dict:
+    translation = transform[:3, 3]
+    rpy = _rotation_to_rpy(transform[:3, :3])
+    quaternion = _rotation_to_quaternion_xyzw(transform[:3, :3])
+    return {
+        "parent_frame": parent_frame,
+        "child_frame": child_frame,
+        "meaning": f"pose of {child_frame} expressed in {parent_frame}",
+        "translation": {
+            "x": float(translation[0]),
+            "y": float(translation[1]),
+            "z": float(translation[2]),
+            "unit": unit,
+        },
+        "rotation_rpy_rad": {
+            "roll": rpy[0], "pitch": rpy[1], "yaw": rpy[2],
+        },
+        "rotation_rpy_deg": {
+            "roll": math.degrees(rpy[0]),
+            "pitch": math.degrees(rpy[1]),
+            "yaw": math.degrees(rpy[2]),
+        },
+        "rotation_quaternion_xyzw": {
+            "x": quaternion[0], "y": quaternion[1],
+            "z": quaternion[2], "w": quaternion[3],
+        },
+        "matrix": transform.tolist(),
+    }
+
+
 class LiveState:
     def __init__(
         self,
         pattern: tuple[int, int],
         square_size: float,
+        square_unit: str,
         output: Path,
         camera_matrix: np.ndarray,
         dist_coeffs: np.ndarray,
@@ -40,6 +131,7 @@ class LiveState:
     ) -> None:
         self.pattern = pattern
         self.square_size = square_size
+        self.square_unit = square_unit
         self.output = output
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
@@ -92,12 +184,72 @@ class LiveState:
             matrix, self.pattern, self.square_size,
             (frame.shape[1], frame.shape[0]), inliers, errors,
         )
+        payload["plane_coordinate_unit"] = self.square_unit
         payload["plane_origin_pixel"] = {
             "u": float(corners[0, 0]),
             "v": float(corners[0, 1]),
         }
+        # Legacy name retained for query_coordinates.py compatibility.
         payload["matrix_camera_plane"] = camera_plane.tolist()
+        payload["matrix_camera_optical_chessboard"] = camera_plane.tolist()
         payload["camera_coordinate_unit"] = payload["plane_coordinate_unit"]
+        # solvePnP returns T_camera_optical_chessboard. Invert it to obtain the
+        # requested pose of the camera relative to the chessboard.
+        chessboard_camera_optical = np.linalg.inv(camera_plane)
+        payload["matrix_chessboard_camera_optical"] = (
+            chessboard_camera_optical.tolist()
+        )
+
+        # REP-103 camera_link axes are x forward, y left, z up; an optical
+        # frame uses x right, y down, z forward. This maps camera_link points
+        # into camera_optical_frame coordinates.
+        optical_camera_link = np.eye(4, dtype=np.float64)
+        optical_camera_link[:3, :3] = np.array(
+            [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]],
+            dtype=np.float64,
+        )
+        chessboard_camera_link = chessboard_camera_optical @ optical_camera_link
+        unit = self.square_unit
+        optical_pose = _ros_transform_payload(
+            chessboard_camera_optical,
+            "chessboard",
+            "camera_optical_frame",
+            unit,
+        )
+        payload["camera_pose_in_chessboard"] = optical_pose
+
+        # geometry_msgs/Transform requires SI units. Preserve the convenient
+        # calibration unit above, but always make ROS 2 transforms metres.
+        metres_per_unit = {"m": 1.0, "cm": 0.01, "mm": 0.001}[unit]
+        ros_chessboard_camera_optical = chessboard_camera_optical.copy()
+        ros_chessboard_camera_link = chessboard_camera_link.copy()
+        ros_chessboard_camera_optical[:3, 3] *= metres_per_unit
+        ros_chessboard_camera_link[:3, 3] *= metres_per_unit
+        payload["ros2_transforms"] = {
+            "chessboard_to_camera_optical": _ros_transform_payload(
+                ros_chessboard_camera_optical,
+                "chessboard",
+                "camera_optical_frame",
+                "m",
+            ),
+            "chessboard_to_camera_link": _ros_transform_payload(
+                ros_chessboard_camera_link,
+                "chessboard",
+                "camera_link",
+                "m",
+            ),
+            "axis_conventions": {
+                "chessboard": "x follows columns, y follows rows, z = x cross y",
+                "camera_optical_frame": (
+                    "x right, y down, z forward (REP-103 optical)"
+                ),
+                "camera_link": "x forward, y left, z up (REP-103 body)",
+            },
+            "tf2_note": (
+                "Publish each entry as parent_frame -> child_frame; "
+                "quaternion order is x,y,z,w"
+            ),
+        }
         payload["pnp_reprojection_rms"] = pnp_rms
         payload["undistorted"] = self.undistort
         payload["pnp_zero_distortion"] = self.zero_distortion or self.undistort
@@ -105,12 +257,36 @@ class LiveState:
         save_payload(self.output, payload)
         annotated = draw_detection(frame, corners, self.pattern)
         origin = tuple(np.round(corners[0]).astype(int))
+        axis_rvec, _ = cv2.Rodrigues(camera_plane[:3, :3])
+        axis_dist_coeffs = (
+            np.zeros_like(self.dist_coeffs)
+            if self.zero_distortion or self.undistort else self.dist_coeffs
+        )
+        cv2.drawFrameAxes(
+            annotated,
+            self.camera_matrix,
+            axis_dist_coeffs,
+            axis_rvec,
+            camera_plane[:3, 3].reshape(3, 1),
+            self.square_size * 2.0,
+            3,
+        )
         cv2.drawMarker(
             annotated, origin, (0, 0, 255), cv2.MARKER_CROSS, 36, 3,
         )
         cv2.putText(
             annotated, "origin (0, 0)", (origin[0] + 12, origin[1] - 12),
             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA,
+        )
+        cv2.putText(
+            annotated,
+            "axes: X red / Y green / Z blue",
+            (16, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
         ok, encoded = cv2.imencode(
             ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 90]
@@ -121,6 +297,29 @@ class LiveState:
             self.result = payload
             self.calibration_jpeg = encoded.tobytes()
             self.error = None
+        translation = optical_pose["translation"]
+        rpy_deg = optical_pose["rotation_rpy_deg"]
+        print(
+            "Camera optical pose in chessboard: "
+            f"xyz=({translation['x']:.6g}, {translation['y']:.6g}, "
+            f"{translation['z']:.6g}) {unit}, "
+            f"rpy=({rpy_deg['roll']:.3f}, {rpy_deg['pitch']:.3f}, "
+            f"{rpy_deg['yaw']:.3f}) deg"
+        )
+        for key in (
+            "chessboard_to_camera_optical",
+            "chessboard_to_camera_link",
+        ):
+            ros_pose = payload["ros2_transforms"][key]
+            ros_translation = ros_pose["translation"]
+            quaternion = ros_pose["rotation_quaternion_xyzw"]
+            print(
+                f"ROS 2 TF {ros_pose['parent_frame']} -> {ros_pose['child_frame']}: "
+                f"xyz=({ros_translation['x']:.6g}, "
+                f"{ros_translation['y']:.6g}, {ros_translation['z']:.6g}) m, "
+                f"q_xyzw=({quaternion['x']:.6g}, {quaternion['y']:.6g}, "
+                f"{quaternion['z']:.6g}, {quaternion['w']:.6g})"
+            )
         return payload
 
 
@@ -251,7 +450,9 @@ function mapCamera(x,y){const T=runtimeCameraTransform;return[T[0][0]*x+T[0][1]*
 let runtimeCameraTransform=null;
 function showMeasurement(r){H=r.matrix_pixel_to_plane;runtimeCameraTransform=r.matrix_camera_plane;coordinateUnit=r.plane_coordinate_unit||'unknown';calibrated=true;stream.hidden=true;image.hidden=false;canvas.hidden=false;
  image.onload=()=>{canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;redraw()};image.src='/calibration.jpg?t='+Date.now();
- [pointButton,distanceButton,clearButton].forEach(b=>b.hidden=false);setMode('point');result.textContent=JSON.stringify(r,null,2)}
+ [pointButton,distanceButton,clearButton].forEach(b=>b.hidden=false);setMode('point');
+ const formatPose=(title,p)=>{const t=p.translation,a=p.rotation_rpy_deg,q=p.rotation_quaternion_xyzw;return `${title}\nparent -> child: ${p.parent_frame} -> ${p.child_frame}\nxyz [${t.unit}]: (${t.x.toFixed(6)}, ${t.y.toFixed(6)}, ${t.z.toFixed(6)})\nrpy [deg]: (${a.roll.toFixed(3)}, ${a.pitch.toFixed(3)}, ${a.yaw.toFixed(3)})\nquaternion xyzw: (${q.x.toFixed(6)}, ${q.y.toFixed(6)}, ${q.z.toFixed(6)}, ${q.w.toFixed(6)})`};
+ result.textContent=formatPose('Camera optical in chessboard',r.camera_pose_in_chessboard)+'\n\n'+formatPose('ROS 2 optical TF',r.ros2_transforms.chessboard_to_camera_optical)+'\n\n'+formatPose('ROS 2 camera_link TF',r.ros2_transforms.chessboard_to_camera_link)+`\n\nFull result:\n${JSON.stringify(r,null,2)}`}
 image.onclick=e=>{if(!H||!runtimeCameraTransform)return;const rect=image.getBoundingClientRect(),u=(e.clientX-rect.left)*image.naturalWidth/rect.width,v=(e.clientY-rect.top)*image.naturalHeight/rect.height,p=mapPixel(u,v),camera=mapCamera(p.x,p.y);
  if(mode==='point')points=[{u,v,...p,camera}];else{if(points.length>=2)points=[];points.push({u,v,...p,camera})}redraw();report()};
 pointButton.onclick=()=>setMode('point');distanceButton.onclick=()=>setMode('distance');clearButton.onclick=()=>{points=[];redraw();report()};
@@ -277,6 +478,10 @@ def main() -> int:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--pattern", default="9x6")
     parser.add_argument("--square-size", type=float, required=True)
+    parser.add_argument(
+        "--square-unit", choices=("mm", "cm", "m"), default="mm",
+        help="unit of --square-size (default: mm); ROS 2 TF output is always metres",
+    )
     parser.add_argument("--output", type=Path, default=Path("pixel_to_plane_homography.json"))
     parser.add_argument(
         "--intrinsics", type=Path,
@@ -324,7 +529,8 @@ def main() -> int:
         capture.release()
         raise SystemExit(f"Invalid intrinsics: {exc}") from exc
     state = LiveState(
-        pattern, args.square_size, args.output, camera_matrix, dist_coeffs,
+        pattern, args.square_size, args.square_unit, args.output,
+        camera_matrix, dist_coeffs,
         args.undistort, args.zero_distortion,
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
